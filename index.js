@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Collection, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
+import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Collection, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } from 'discord.js';
 import dotenv from 'dotenv';
 import express from 'express';
 
@@ -13,7 +13,8 @@ let latestWarrant = {
   nome: "",
   motivo: "",
   emissor: "",
-  timeStamp: ""
+  timeStamp: "",
+  processUrl: ""
 };
 
 // Lista de todos os mandados de prisão em aberto
@@ -1115,9 +1116,96 @@ client.on('interactionCreate', async (interaction) => {
           }).catch(() => null);
         }
 
-        // Cria o Modal
+        // Buscar canais para encontrar a seção de Petições
+        const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
+        const channelsArray = safeGetArray(channels);
+        const peticoesChannel = channelsArray.find(c => c && c.name && matchChannel(c.name, 'petições'));
+
+        let threadsArray = [];
+        if (peticoesChannel) {
+          const active = await peticoesChannel.threads.fetchActive().catch(() => ({ threads: new Map() }));
+          threadsArray = safeGetArray(active.threads).filter(t => t && t.name && (t.name.includes('PROC-') || t.name.includes('🔒 SEGREDO')));
+        }
+
+        // Se houver processos ativos, mostramos o Select Menu primeiro
+        if (threadsArray.length > 0) {
+          const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId('select_processo_mandado')
+            .setPlaceholder('Escolha o processo relacionado...');
+
+          const options = [
+            new StringSelectMenuOptionBuilder()
+              .setLabel('Nenhum Processo')
+              .setDescription('Não associar este mandado a nenhum processo.')
+              .setValue('none')
+          ];
+
+          // Limita a 24 processos
+          const limitThreads = threadsArray.slice(0, 24);
+          for (const thread of limitThreads) {
+            options.push(
+              new StringSelectMenuOptionBuilder()
+                .setLabel(thread.name.substring(0, 100))
+                .setValue(thread.id)
+            );
+          }
+
+          selectMenu.addOptions(options);
+          const row = new ActionRowBuilder().addComponents(selectMenu);
+
+          await interaction.reply({
+            content: '⚖️ **BNMP:** Selecione a qual processo em `#📜・petições` este mandado de prisão está associado:',
+            components: [row],
+            ephemeral: true
+          }).catch(() => null);
+        } else {
+          // Se não houver nenhum processo ativo, abre o modal direto sem associação
+          const modal = new ModalBuilder()
+            .setCustomId('modal_registrar_mandado_none')
+            .setTitle('Registrar Mandado de Prisão');
+
+          const inputNome = new TextInputBuilder()
+            .setCustomId('input_nome')
+            .setLabel('Nome in-game do Acusado')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setPlaceholder('Ex: Joaozinho_BR');
+
+          const inputMotivo = new TextInputBuilder()
+            .setCustomId('input_motivo')
+            .setLabel('Motivo / Artigo / Crime')
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+            .setPlaceholder('Descreva os motivos e artigos que fundamentam a prisão...');
+
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(inputNome),
+            new ActionRowBuilder().addComponents(inputMotivo)
+          );
+
+          await interaction.showModal(modal).catch(err => {
+            console.error('[BNMP] Erro ao abrir modal de mandado:', err);
+          });
+        }
+      } catch (err) {
+        console.error('[BNMP] Erro na interação do botão de mandado:', err);
+        await interaction.reply({
+          content: '❌ Ocorreu um erro interno ao tentar abrir o formulário.',
+          ephemeral: true
+        }).catch(() => null);
+      }
+      return;
+    }
+  }
+
+  // TRATAMENTO DE SELEÇÃO DE PROCESSO (SELECT MENU)
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId === 'select_processo_mandado') {
+      try {
+        const threadId = interaction.values[0];
+
         const modal = new ModalBuilder()
-          .setCustomId('modal_registrar_mandado')
+          .setCustomId(`modal_registrar_mandado_${threadId}`)
           .setTitle('Registrar Mandado de Prisão');
 
         const inputNome = new TextInputBuilder()
@@ -1140,12 +1228,12 @@ client.on('interactionCreate', async (interaction) => {
         );
 
         await interaction.showModal(modal).catch(err => {
-          console.error('[BNMP] Erro ao abrir modal de mandado:', err);
+          console.error('[BNMP] Erro ao abrir modal após select:', err);
         });
       } catch (err) {
-        console.error('[BNMP] Erro na interação do botão de mandado:', err);
+        console.error('[BNMP] Erro na seleção do processo:', err);
         await interaction.reply({
-          content: '❌ Ocorreu um erro interno ao tentar abrir o formulário.',
+          content: '❌ Ocorreu um erro interno ao carregar o formulário.',
           ephemeral: true
         }).catch(() => null);
       }
@@ -1155,15 +1243,26 @@ client.on('interactionCreate', async (interaction) => {
 
   // TRATAMENTO DE ENVIO DE FORMULÁRIO (MODAL SUBMIT)
   if (interaction.isModalSubmit()) {
-    if (interaction.customId === 'modal_registrar_mandado') {
+    if (interaction.customId.startsWith('modal_registrar_mandado')) {
       try {
         await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
+        const threadId = interaction.customId.includes('_') ? interaction.customId.split('_').pop() : 'none';
         const nome = interaction.fields.getTextInputValue('input_nome');
         const motivo = interaction.fields.getTextInputValue('input_motivo');
 
         const mandadoId = `MP-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
         const timeStamp = getFormattedDateTime();
+
+        let threadUrl = "";
+        let threadName = "";
+        if (threadId && threadId !== 'none') {
+          const thread = await interaction.guild.channels.fetch(threadId).catch(() => null);
+          if (thread) {
+            threadUrl = thread.url;
+            threadName = thread.name;
+          }
+        }
 
         const embed = new EmbedBuilder()
           .setTitle('🚨 MANDADO DE PRISÃO EXPEDIDO')
@@ -1178,12 +1277,17 @@ client.on('interactionCreate', async (interaction) => {
           .setTimestamp()
           .setFooter({ text: 'Banco Nacional de Mandados de Prisão' });
 
+        if (threadUrl !== "") {
+          embed.addFields({ name: '📜 Processo Associado', value: `[${threadName}](${threadUrl})`, inline: false });
+        }
+
         latestWarrant = {
           id: mandadoId,
           nome: nome,
           motivo: motivo,
           emissor: interaction.user.username,
-          timeStamp: timeStamp
+          timeStamp: timeStamp,
+          processUrl: threadUrl
         };
 
         openWarrants.push(latestWarrant);
@@ -1191,7 +1295,18 @@ client.on('interactionCreate', async (interaction) => {
           openWarrants.shift();
         }
 
-        await interaction.channel.send({ embeds: [embed] });
+        // Se houver processo, envia a mensagem com o botão de link no Discord
+        if (threadUrl !== "") {
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setLabel('Ir para o Processo')
+              .setStyle(ButtonStyle.Link)
+              .setURL(threadUrl)
+          );
+          await interaction.channel.send({ embeds: [embed], components: [row] });
+        } else {
+          await interaction.channel.send({ embeds: [embed] });
+        }
 
         await interaction.editReply({
           content: '✅ **Mandado de Prisão expedido e publicado com sucesso no canal!**'
