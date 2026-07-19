@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Collection } from 'discord.js';
+import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Collection, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
 import dotenv from 'dotenv';
 import express from 'express';
 
@@ -6,6 +6,15 @@ dotenv.config();
 
 // Cache global em memória para a carga de trabalho dos juízes
 const juizWorkloadsCache = {};
+
+// Cache global em memória para o último mandado de prisão expedido
+let latestWarrant = {
+  id: "",
+  nome: "",
+  motivo: "",
+  emissor: "",
+  timeStamp: ""
+};
 
 // Helper para comparar nomes de canais de forma robusta e tolerante a emojis e acentos
 function matchChannel(channelName, targetKeyword) {
@@ -288,7 +297,75 @@ async function updateJuizesWorkload(guild) {
   }
 }
 
-client.once('clientReady', async () => {
+// Inicializa o canal do BNMP no servidor
+async function initializeBNMP(guild) {
+  try {
+    const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
+    const channelsArray = safeGetArray(channels);
+    const bnmpChannel = channelsArray.find(c => c && c.name && matchChannel(c.name, 'bnmp-prisoes'));
+
+    if (!bnmpChannel || !bnmpChannel.isTextBased()) {
+      console.log(`[BNMP] Canal "bnmp-prisões" não encontrado no servidor: ${guild.name}`);
+      return;
+    }
+
+    // Busca mensagens fixadas
+    const pinnedMessages = await bnmpChannel.messages.fetchPinned().catch(() => null);
+    
+    // Procura por mensagem enviada por este bot que contém o botão de registrar mandado
+    let setupMessage = null;
+    if (pinnedMessages) {
+      setupMessage = safeGetArray(pinnedMessages).find(m => 
+        m.author.id === client.user.id && 
+        m.components && 
+        m.components.some(row => row.components.some(c => c.customId === 'btn_registrar_mandado'))
+      );
+    }
+
+    if (!setupMessage) {
+      console.log(`[BNMP] Painel de controle não encontrado no canal #${bnmpChannel.name} de ${guild.name}. Criando novo...`);
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🏛️ BANCO NACIONAL DE MANDADOS DE PRISÃO (BNMP)')
+        .setDescription('Painel de controle para emissão de Mandados de Prisão.\n\nApenas **Juízes de Direito** possuem permissão para registrar mandados.')
+        .setColor(0x2f3136)
+        .setTimestamp()
+        .setFooter({ text: 'Tribunal de Justiça - Governo Federal' });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_registrar_mandado')
+          .setLabel('Registrar novo Mandado de Prisão')
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      const sentMsg = await bnmpChannel.send({ embeds: [embed], components: [row] });
+      await sentMsg.pin().catch(() => null);
+
+      // Aguarda 2 segundos e tenta limpar as mensagens de sistema sobre a fixação
+      setTimeout(async () => {
+        try {
+          const sysMsgs = await bnmpChannel.messages.fetch({ limit: 10 }).catch(() => null);
+          if (sysMsgs) {
+            const pinMsg = safeGetArray(sysMsgs).find(m => m.type === 6); // 6 = ChannelPinMessage em d.js v14
+            if (pinMsg) {
+              await pinMsg.delete().catch(() => null);
+              console.log('[BNMP] Mensagem de sistema da fixação de mensagem foi removida.');
+            }
+          }
+        } catch (e) {
+          console.error('[BNMP] Erro ao tentar apagar mensagem de sistema da fixação:', e);
+        }
+      }, 2000);
+    } else {
+      console.log(`[BNMP] Painel de controle já está presente e fixado no canal #${bnmpChannel.name} de ${guild.name}.`);
+    }
+  } catch (err) {
+    console.error('[BNMP] Erro ao inicializar canal do BNMP:', err);
+  }
+}
+
+client.once('ready', async () => {
   console.log(`Bot de Peticionamento conectado com sucesso como: ${client.user.tag}`);
   
   try {
@@ -299,6 +376,7 @@ client.once('clientReady', async () => {
       // Inicializa o cache de juízes e depois atualiza o relatório
       await initializeJuizesWorkload(guild).catch(() => null);
       await updateJuizesWorkload(guild).catch(() => null);
+      await initializeBNMP(guild).catch(() => null);
     }
   } catch (err) {
     console.error('Erro no startup:', err);
@@ -947,74 +1025,176 @@ async function runPetitionWizard(thread, authorId) {
   }
 }
 
-// LISTENER PARA O BOTÃO DE PETICIONAMENTO
+// LISTENER PARA O BOTÃO DE PETICIONAMENTO E EVENTOS DE INTERAÇÃO
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isButton()) return;
+  if (interaction.isButton()) {
+    // REUNIÃO PARA DESPACHO ENTRE JUIZ E ADVOGADO
+    if (interaction.customId.startsWith('btn_despacho_')) {
+      const juizId = interaction.customId.replace('btn_despacho_', '');
+      const guild = interaction.guild;
 
-  // REUNIÃO PARA DESPACHO ENTRE JUIZ E ADVOGADO
-  if (interaction.customId.startsWith('btn_despacho_')) {
-    const juizId = interaction.customId.replace('btn_despacho_', '');
-    const guild = interaction.guild;
+      try {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
-    try {
-      await interaction.deferReply({ ephemeral: true }).catch(() => null);
+        // Busca o membro do juiz
+        const juizMember = await guild.members.fetch(juizId).catch(() => null);
+        const juizName = juizMember ? juizMember.user.username : 'Juiz';
 
-      // Busca o membro do juiz
-      const juizMember = await guild.members.fetch(juizId).catch(() => null);
-      const juizName = juizMember ? juizMember.user.username : 'Juiz';
+        // Cria a thread privativa diretamente no canal de juízes (interaction.channel)
+        const threadName = `Despacho - ${interaction.user.username} & ${juizName}`;
+        const thread = await interaction.channel.threads.create({
+          name: threadName.substring(0, 100),
+          autoArchiveDuration: 1440,
+          type: ChannelType.PrivateThread,
+          reason: `Reunião para despacho solicitada por ${interaction.user.tag}`
+        });
 
-      // Cria a thread privativa diretamente no canal de juízes (interaction.channel)
-      const threadName = `Despacho - ${interaction.user.username} & ${juizName}`;
-      const thread = await interaction.channel.threads.create({
-        name: threadName.substring(0, 100),
-        autoArchiveDuration: 1440,
-        type: ChannelType.PrivateThread,
-        reason: `Reunião para despacho solicitada por ${interaction.user.tag}`
-      });
+        // Adiciona o solicitante e o juiz à thread
+        await thread.members.add(interaction.user.id).catch(() => null);
+        await thread.members.add(juizId).catch(() => null);
 
-      // Adiciona o solicitante e o juiz à thread
-      await thread.members.add(interaction.user.id).catch(() => null);
-      await thread.members.add(juizId).catch(() => null);
+        // Envia a mensagem de boas-vindas marcando e contextualizando
+        const welcomeMsg = `🏛️ **AUDIÊNCIA DE DESPACHO INICIADA**\n\n` +
+                           `Esta thread privativa foi aberta para despachos e alinhamentos processuais entre o Magistrado e a Parte/Advogado solicitante.\n\n` +
+                           `* **Solicitante:** <@${interaction.user.id}>\n` +
+                           `* **Magistrado Designado:** <@${juizId}>\n\n` +
+                           `Juiz <@${juizId}>, você foi convocado pelo solicitante <@${interaction.user.id}> para realizar o despacho.`;
+        await thread.send(welcomeMsg).catch(() => null);
 
-      // Envia a mensagem de boas-vindas marcando e contextualizando
-      const welcomeMsg = `🏛️ **AUDIÊNCIA DE DESPACHO INICIADA**\n\n` +
-                         `Esta thread privativa foi aberta para despachos e alinhamentos processuais entre o Magistrado e a Parte/Advogado solicitante.\n\n` +
-                         `* **Solicitante:** <@${interaction.user.id}>\n` +
-                         `* **Magistrado Designado:** <@${juizId}>\n\n` +
-                         `Juiz <@${juizId}>, você foi convocado pelo solicitante <@${interaction.user.id}> para realizar o despacho.`;
-      await thread.send(welcomeMsg).catch(() => null);
+        await interaction.editReply({ content: `✅ **Sucesso:** Reunião de despacho agendada! Acesse a sala privativa aqui: <#${thread.id}>.` }).catch(() => null);
 
-      await interaction.editReply({ content: `✅ **Sucesso:** Reunião de despacho agendada! Acesse a sala privativa aqui: <#${thread.id}>.` }).catch(() => null);
-
-    } catch (err) {
-      console.error('Erro ao criar reunião de despacho:', err);
-      await interaction.editReply({ content: '❌ Ocorreu um erro interno ao tentar agendar o despacho com o juiz.' }).catch(() => null);
+      } catch (err) {
+        console.error('Erro ao criar reunião de despacho:', err);
+        await interaction.editReply({ content: '❌ Ocorreu um erro interno ao tentar agendar o despacho com o juiz.' }).catch(() => null);
+      }
+      return;
     }
-    return;
+
+    if (interaction.customId === 'btn_peticionar') {
+      try {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+        const channel = interaction.channel;
+        const thread = await channel.threads.create({
+          name: `Petição - ${interaction.user.username}`,
+          autoArchiveDuration: 60,
+          type: ChannelType.PrivateThread,
+          reason: `Peticionamento eletrônico iniciado por ${interaction.user.tag}`,
+        });
+
+        await thread.members.add(interaction.user.id);
+        await thread.send(`Olá <@${interaction.user.id}>! Iniciando seu peticionamento eletrônico confidencial.`);
+        
+        runPetitionWizard(thread, interaction.user.id);
+
+        await interaction.editReply({ content: `✅ Thread privada criada com sucesso: <#${thread.id}>!` }).catch(() => null);
+
+      } catch (err) {
+        console.error('Erro ao iniciar petição via botão:', err);
+        await interaction.followUp({ content: 'Ocorreu um erro ao tentar criar a thread privada. Certifique-se de que o bot tem permissão de "Criar Threads Privadas" no canal.', ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
+
+    // BOTÃO REGISTRAR MANDADO (BNMP)
+    if (interaction.customId === 'btn_registrar_mandado') {
+      const guild = interaction.guild;
+      const member = interaction.member;
+
+      try {
+        const roles = await guild.roles.fetch().catch(() => guild.roles.cache);
+        const juizRole = roles.find(r => r.name === 'J. Dir. | Juiz de Direito');
+
+        if (!juizRole || !member.roles.cache.has(juizRole.id)) {
+          return interaction.reply({
+            content: '⚠️ **Acesso Negado:** Apenas Juízes de Direito (@J. Dir. | Juiz de Direito) podem registrar novos mandados de prisão.',
+            ephemeral: true
+          }).catch(() => null);
+        }
+
+        // Cria o Modal
+        const modal = new ModalBuilder()
+          .setCustomId('modal_registrar_mandado')
+          .setTitle('Registrar Mandado de Prisão');
+
+        const inputNome = new TextInputBuilder()
+          .setCustomId('input_nome')
+          .setLabel('Nome in-game do Acusado')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder('Ex: Joaozinho_BR');
+
+        const inputMotivo = new TextInputBuilder()
+          .setCustomId('input_motivo')
+          .setLabel('Motivo / Artigo / Crime')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setPlaceholder('Descreva os motivos e artigos que fundamentam a prisão...');
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(inputNome),
+          new ActionRowBuilder().addComponents(inputMotivo)
+        );
+
+        await interaction.showModal(modal).catch(err => {
+          console.error('[BNMP] Erro ao abrir modal de mandado:', err);
+        });
+      } catch (err) {
+        console.error('[BNMP] Erro na interação do botão de mandado:', err);
+        await interaction.reply({
+          content: '❌ Ocorreu um erro interno ao tentar abrir o formulário.',
+          ephemeral: true
+        }).catch(() => null);
+      }
+      return;
+    }
   }
 
-  if (interaction.customId === 'btn_peticionar') {
-    try {
-      await interaction.deferReply({ ephemeral: true }).catch(() => null);
+  // TRATAMENTO DE ENVIO DE FORMULÁRIO (MODAL SUBMIT)
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId === 'modal_registrar_mandado') {
+      try {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
-      const channel = interaction.channel;
-      const thread = await channel.threads.create({
-        name: `Petição - ${interaction.user.username}`,
-        autoArchiveDuration: 60,
-        type: ChannelType.PrivateThread,
-        reason: `Peticionamento eletrônico iniciado por ${interaction.user.tag}`,
-      });
+        const nome = interaction.fields.getTextInputValue('input_nome');
+        const motivo = interaction.fields.getTextInputValue('input_motivo');
 
-      await thread.members.add(interaction.user.id);
-      await thread.send(`Olá <@${interaction.user.id}>! Iniciando seu peticionamento eletrônico confidencial.`);
-      
-      runPetitionWizard(thread, interaction.user.id);
+        const mandadoId = `MP-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+        const timeStamp = getFormattedDateTime();
 
-      await interaction.editReply({ content: `✅ Thread privada criada com sucesso: <#${thread.id}>!` }).catch(() => null);
+        const embed = new EmbedBuilder()
+          .setTitle('🚨 MANDADO DE PRISÃO EXPEDIDO')
+          .setColor(0xd9534f)
+          .addFields(
+            { name: '📂 Mandado Nº', value: `\`${mandadoId}\``, inline: true },
+            { name: '👤 Acusado (Roblox)', value: `\`${nome}\``, inline: true },
+            { name: '⚖️ Autoridade Emissora', value: `<@${interaction.user.id}>`, inline: true },
+            { name: '📝 Motivo / Crime', value: motivo, inline: false },
+            { name: '📅 Data de Expedição', value: timeStamp, inline: true }
+          )
+          .setTimestamp()
+          .setFooter({ text: 'Banco Nacional de Mandados de Prisão' });
 
-    } catch (err) {
-      console.error('Erro ao iniciar petição via botão:', err);
-      await interaction.followUp({ content: 'Ocorreu um erro ao tentar criar a thread privada. Certifique-se de que o bot tem permissão de "Criar Threads Privadas" no canal.', ephemeral: true }).catch(() => null);
+        latestWarrant = {
+          id: mandadoId,
+          nome: nome,
+          motivo: motivo,
+          emissor: interaction.user.username,
+          timeStamp: timeStamp
+        };
+
+        await interaction.channel.send({ embeds: [embed] });
+
+        await interaction.editReply({
+          content: '✅ **Mandado de Prisão expedido e publicado com sucesso no canal!**'
+        }).catch(() => null);
+
+      } catch (err) {
+        console.error('[BNMP] Erro ao registrar mandado de prisão via modal:', err);
+        await interaction.editReply({
+          content: '❌ Ocorreu um erro interno ao processar o mandado.'
+        }).catch(() => null);
+      }
     }
   }
 });
@@ -1156,6 +1336,11 @@ app.post('/start-votacao', async (req, res) => {
     console.error('[Web Server] Erro ao enviar início de votação para o Discord:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// Endpoint para fornecer o último mandado de prisão para o Roblox
+app.get('/latest-warrant', (req, res) => {
+  res.json(latestWarrant);
 });
 
 // Endpoint de B.O. (Boletim de Ocorrência) para integração do Roblox
