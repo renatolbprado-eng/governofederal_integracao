@@ -7,6 +7,19 @@ dotenv.config();
 // Cache global em memória para a carga de trabalho dos juízes
 const juizWorkloadsCache = {};
 
+// Helper para comparar nomes de canais de forma robusta e tolerante a emojis e acentos
+function matchChannel(channelName, targetKeyword) {
+  if (!channelName) return false;
+  const normalizedChannel = channelName.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const normalizedTarget = targetKeyword.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  
+  if (normalizedTarget === 'bo') {
+    return new RegExp('\\bbo\\b').test(normalizedChannel);
+  }
+  
+  return normalizedChannel.includes(normalizedTarget);
+}
+
 // Inicializa o cliente do Discord com as intenções necessárias
 const client = new Client({
   intents: [
@@ -131,12 +144,8 @@ async function initializeJuizesWorkload(guild) {
 
     const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
     const channelsArray = safeGetArray(channels);
-    const peticoesChannel = channelsArray.find(c => 
-      c && c.name && (c.name === '📜・petições' || c.name === '📜・peticoes' || c.name === 'petições' || c.name === 'peticoes')
-    );
-    const peticionamentoChannel = channelsArray.find(c => 
-      c && c.name && (c.name === 'peticionamento-eletrônico' || c.name === 'peticionamento-eletronico')
-    );
+    const peticoesChannel = channelsArray.find(c => c && c.name && matchChannel(c.name, 'petições'));
+    const peticionamentoChannel = channelsArray.find(c => c && c.name && matchChannel(c.name, 'peticionamento-eletrônico'));
 
     const allThreads = [];
 
@@ -187,9 +196,7 @@ async function updateJuizesWorkload(guild) {
   try {
     const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
     const channelsArray = safeGetArray(channels);
-    const juizesChannel = channelsArray.find(c => 
-      c && c.name && (c.name.toLowerCase() === 'juízes' || c.name.toLowerCase() === 'juizes')
-    );
+    const juizesChannel = channelsArray.find(c => c && c.name && matchChannel(c.name, 'juízes'));
     if (!juizesChannel || !juizesChannel.isTextBased()) {
       console.log(`[Juízes Relatório] Canal "Juízes" não encontrado no servidor: ${guild.name}`);
       return;
@@ -324,10 +331,7 @@ client.on('messageCreate', async (message) => {
 
       const { processId, authorUser, defendantUser, authorLawyers, defendantLawyers } = parties;
 
-      const peticionamentoChannel = guild.channels.cache.find(c => 
-        c.name.toLowerCase().includes('peticionamento-eletrônico') || 
-        c.name.toLowerCase().includes('peticionamento-eletronico')
-      );
+      const peticionamentoChannel = guild.channels.cache.find(c => c && c.name && matchChannel(c.name, 'peticionamento-eletrônico'));
       const targetParent = peticionamentoChannel || message.channel.parent;
 
       if (!targetParent || !targetParent.isTextBased()) {
@@ -604,8 +608,7 @@ client.on('messageCreate', async (message) => {
   }
 
   // LÓGICA DE INICIALIZAÇÃO DO PETICIONAMENTO (Canal Principal)
-  const isTargetChannel = message.channel.name.toLowerCase().includes('peticionamento-eletrônico') || 
-                          message.channel.name.toLowerCase().includes('peticionamento-eletronico');
+  const isTargetChannel = message.channel && message.channel.name && matchChannel(message.channel.name, 'peticionamento-eletrônico');
 
   if (isTargetChannel) {
     await message.delete().catch(() => null);
@@ -787,12 +790,7 @@ async function runPetitionWizard(thread, authorId) {
     } else {
       // Busca ativa de canais com fetch para evitar falha por falta de cache
       const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
-      const peticoesChannel = channels.find(c => 
-        c.name === '📜・petições' || 
-        c.name === '📜・peticoes' ||
-        c.name === 'petições' || 
-        c.name === 'peticoes'
-      );
+      const peticoesChannel = channels.find(c => c && c.name && matchChannel(c.name, 'petições'));
 
       if (peticoesChannel) {
         if (peticoesChannel.type === ChannelType.GuildForum) {
@@ -1071,9 +1069,7 @@ app.post('/submit-auditoria', async (req, res) => {
     for (const [guildId, guild] of client.guilds.cache) {
       // Busca ativa de canais com fetch para garantir cache atualizado
       const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
-      const channel = channels.find(c => 
-        (c.name.toLowerCase().includes('painel-de-votação') || c.name.toLowerCase().includes('painel-de-votacao')) && c.isTextBased()
-      );
+      const channel = channels.find(c => c && c.name && matchChannel(c.name, 'painel-de-votação') && c.isTextBased());
       
       if (channel) {
         // Formata a lista de votos nominais
@@ -1131,9 +1127,7 @@ app.post('/start-votacao', async (req, res) => {
     for (const [guildId, guild] of client.guilds.cache) {
       // Busca ativa de canais com fetch para garantir cache atualizado
       const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
-      const channel = channels.find(c => 
-        c.name.toLowerCase().includes('mesa-diretora-cn') && c.isTextBased()
-      );
+      const channel = channels.find(c => c && c.name && matchChannel(c.name, 'mesa-diretora-cn') && c.isTextBased());
       
       if (channel) {
         const embed = new EmbedBuilder()
@@ -1171,9 +1165,7 @@ app.post('/submit-bo', async (req, res) => {
     let sent = false;
     for (const [guildId, guild] of client.guilds.cache) {
       const channel = guild.channels.cache.find(c => 
-        c.name.toLowerCase() === 'boletim-de-ocorrência' || 
-        c.name.toLowerCase() === 'boletim-de-ocorrencia' ||
-        c.name.toLowerCase() === 'bo'
+        c && c.name && (matchChannel(c.name, 'boletim-de-ocorrência') || matchChannel(c.name, 'bo'))
       );
       if (channel && channel.isTextBased()) {
         const embed = new EmbedBuilder()
