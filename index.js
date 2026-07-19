@@ -16,6 +16,9 @@ let latestWarrant = {
   timeStamp: ""
 };
 
+// Lista de todos os mandados de prisão em aberto
+let openWarrants = [];
+
 // Helper para comparar nomes de canais de forma robusta e tolerante a emojis e acentos
 function matchChannel(channelName, targetKeyword) {
   if (!channelName) return false;
@@ -1183,6 +1186,11 @@ client.on('interactionCreate', async (interaction) => {
           timeStamp: timeStamp
         };
 
+        openWarrants.push(latestWarrant);
+        if (openWarrants.length > 20) {
+          openWarrants.shift();
+        }
+
         await interaction.channel.send({ embeds: [embed] });
 
         await interaction.editReply({
@@ -1347,6 +1355,11 @@ app.post('/start-votacao', async (req, res) => {
 // Endpoint para fornecer o último mandado de prisão para o Roblox
 app.get('/latest-warrant', (req, res) => {
   res.json(latestWarrant);
+});
+
+// Endpoint para fornecer todos os mandados de prisão em aberto para o Roblox
+app.get('/open-warrants', (req, res) => {
+  res.json(openWarrants);
 });
 
 // Endpoint de B.O. (Boletim de Ocorrência) para integração do Roblox
