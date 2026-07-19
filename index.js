@@ -1230,6 +1230,12 @@ client.on('guildMemberRemove', async (member) => {
 const app = express();
 app.use(express.json());
 
+// Middleware de Log para diagnóstico no Render
+app.use((req, res, next) => {
+  console.log(`[HTTP Request] ${req.method} ${req.url} - IP: ${req.ip} - User-Agent: ${req.headers['user-agent']}`);
+  next();
+});
+
 // Rota GET / para monitoramento de atividade (uptime check)
 app.get('/', (req, res) => {
   res.status(200).send('Bot de integração do Governo Federal está online e operacional!');
