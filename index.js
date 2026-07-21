@@ -605,7 +605,7 @@ client.on('messageCreate', async (message) => {
         const poloName = isAutor ? 'Parte Autora (Requerente)' : 'Parte Ré (Requerida)';
 
         const askMsg = await message.channel.send({
-          content: `⚖️ **Cartório Judicial:** Mencione todos os advogados a serem adicionados à **${poloName}**:`
+          content: `⚖️ **Cartório Judicial:** Mencione todos os advogados a serem adicionados à **${poloName}** (ex: @pessoa1):`
         });
         messagesToDelete.push(askMsg);
 
@@ -680,6 +680,156 @@ client.on('messageCreate', async (message) => {
       } catch (err) {
         console.error('Erro no comando !adv:', err);
         const temp = await message.channel.send('❌ Ocorreu um erro interno ao executar o comando !adv.').catch(() => null);
+        if (temp) setTimeout(() => temp.delete().catch(() => null), 5000);
+        for (const msg of messagesToDelete) {
+          await msg.delete().catch(() => null);
+        }
+      }
+      return;
+    }
+
+    // COMANDO !OFICIO (Disparo do botão de ofício para o juiz)
+    if (content.toLowerCase() === '!oficio') {
+      const guild = message.guild;
+      const juizRole = guild.roles.cache.find(r => r.name === 'J. Dir. | Juiz de Direito');
+      
+      // Verifica se quem chamou o comando é Juiz de Direito
+      if (!juizRole || !message.member.roles.cache.has(juizRole.id)) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito com o cargo adequado podem expedir ofícios.').catch(() => null);
+        return;
+      }
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_abrir_oficio')
+          .setLabel('Redigir Ofício')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await message.reply({
+        content: '🏛️ **Ofício Judicial:** Clique no botão abaixo para abrir a caixa de redação do Ofício/Ato Ordinatório.',
+        components: [row]
+      }).catch(() => null);
+      return;
+    }
+
+    // COMANDO !PARTES (Adição/Atualização interativa de Partes do processo no card inicial)
+    if (content.toLowerCase() === '!partes') {
+      const messagesToDelete = [message];
+      
+      try {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('partes_autor').setLabel('Parte Autora (Requerente)').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('partes_reu').setLabel('Parte Ré (Requerida)').setStyle(ButtonStyle.Success)
+        );
+
+        const promptMsg = await message.channel.send({
+          content: `⚖️ **Cartório Judicial:** Para qual polo deseja alterar/adicionar a Parte?`,
+          components: [row]
+        });
+        messagesToDelete.push(promptMsg);
+
+        const buttonInteraction = await message.channel.awaitMessageComponent({
+          filter: i => i.user.id === message.author.id,
+          time: 60000
+        }).catch(() => null);
+
+        if (!buttonInteraction) {
+          const temp = await message.channel.send('⏳ Tempo limite de resposta excedido para o polo.').catch(() => null);
+          if (temp) setTimeout(() => temp.delete().catch(() => null), 5000);
+          for (const msg of messagesToDelete) {
+            await msg.delete().catch(() => null);
+          }
+          return;
+        }
+
+        await buttonInteraction.deferUpdate().catch(() => null);
+        const isAutor = buttonInteraction.customId === 'partes_autor';
+        const poloName = isAutor ? 'Parte Autora (Requerente)' : 'Parte Ré (Requerida)';
+
+        const askMsg = await message.channel.send({
+          content: `⚖️ **Cartório Judicial:** Mencione a nova parte para o polo de **${poloName}** (ex: @pessoa1):`
+        });
+        messagesToDelete.push(askMsg);
+
+        const textCollected = await message.channel.awaitMessages({
+          filter: m => m.author.id === message.author.id,
+          max: 1,
+          time: 120000,
+          errors: ['time']
+        }).catch(() => null);
+
+        if (!textCollected || textCollected.size === 0) {
+          const temp = await message.channel.send('⏳ Tempo limite excedido para menção da parte.').catch(() => null);
+          if (temp) setTimeout(() => temp.delete().catch(() => null), 5000);
+          for (const msg of messagesToDelete) {
+            await msg.delete().catch(() => null);
+          }
+          return;
+        }
+
+        const responseMsg = textCollected.first();
+        messagesToDelete.push(responseMsg);
+
+        const mentionedUser = responseMsg.mentions.users.first();
+        if (!mentionedUser) {
+          const temp = await message.channel.send('⚠️ **Erro:** Você precisa mencionar um usuário do Discord (ex: @pessoa1).').catch(() => null);
+          if (temp) setTimeout(() => temp.delete().catch(() => null), 5000);
+          for (const msg of messagesToDelete) {
+            await msg.delete().catch(() => null);
+          }
+          return;
+        }
+
+        // Adiciona a parte à thread
+        await message.channel.members.add(mentionedUser.id).catch(() => null);
+
+        // Atualização do Embed
+        const msgs = await message.channel.messages.fetch({ limit: 50 });
+        const botEmbedMsg = msgs.filter(m => m.author.id === client.user.id && m.embeds.length > 0)
+                                 .sort((a, b) => a.createdTimestamp - b.createdTimestamp).first();
+
+        if (botEmbedMsg) {
+          const originalEmbed = botEmbedMsg.embeds[0];
+          const newEmbed = EmbedBuilder.from(originalEmbed);
+          const mentionText = `<@${mentionedUser.id}>`;
+
+          const fieldName = isAutor ? 'Discord do Autor' : 'Discord do Réu';
+          const fields = originalEmbed.fields.map(f => {
+            if (f.name.includes(fieldName)) {
+              return { name: f.name, value: mentionText, inline: f.inline };
+            }
+            return f;
+          });
+          
+          newEmbed.setFields(fields);
+          await botEmbedMsg.edit({ embeds: [newEmbed] });
+
+          // Deleta mensagens temporárias do comando
+          for (const msg of messagesToDelete) {
+            await msg.delete().catch(() => null);
+          }
+
+          // Cria a movimentação de alteração de partes
+          const timeStamp = getFormattedDateTime();
+          const movMsg = `=========================================\n` +
+                         `⚖️ **ATO ORDINATÓRIO - VINCULAÇÃO DE PARTE**\n` +
+                         `📅 *Movimentação em: ${timeStamp}*\n\n` +
+                         `> Vinculado(a) o(a) novo(a) participante para a **${isAutor ? 'Parte Autora' : 'Parte Ré'}**:\n` +
+                         `> * ${mentionText}\n` +
+                         `=========================================`;
+          await message.channel.send(movMsg).catch(() => null);
+        } else {
+          const temp = await message.channel.send('⚠️ **Erro:** Não foi possível localizar o embed inicial para atualizar.').catch(() => null);
+          if (temp) setTimeout(() => temp.delete().catch(() => null), 5000);
+          for (const msg of messagesToDelete) {
+            await msg.delete().catch(() => null);
+          }
+        }
+
+      } catch (err) {
+        console.error('Erro no comando !partes:', err);
+        const temp = await message.channel.send('❌ Ocorreu um erro interno ao executar o comando !partes.').catch(() => null);
         if (temp) setTimeout(() => temp.delete().catch(() => null), 5000);
         for (const msg of messagesToDelete) {
           await msg.delete().catch(() => null);
@@ -773,14 +923,14 @@ async function runPetitionWizard(thread, authorId) {
     data.defendantName = defMsg.content.trim();
 
     // 5. Discord do Autor (Opcional)
-    const discAuthMsg = await askQuestion('Mencione o Discord da **parte Autora/Exequente** (ou digite **"nenhum"** para pular):');
+    const discAuthMsg = await askQuestion('Mencione o Discord da **parte Autora/Exequente** (ex: @pessoa1) (ou digite **"nenhum"** para pular):');
     if (!discAuthMsg) return timeout();
     const parsedAuth = parseOptionalDiscordUser(discAuthMsg);
     data.discordAuthor = parsedAuth.user;
     data.discordAuthorRaw = parsedAuth.raw;
 
     // 6. Discord do Réu (Opcional)
-    const discDefMsg = await askQuestion('Mencione o Discord da **parte Ré/Executada** (ou digite **"nenhum"** para pular):');
+    const discDefMsg = await askQuestion('Mencione o Discord da **parte Ré/Executada** (ex: @pessoa1) (ou digite **"nenhum"** para pular):');
     if (!discDefMsg) return timeout();
     const parsedDef = parseOptionalDiscordUser(discDefMsg);
     data.discordDefendant = parsedDef.user;
@@ -1031,6 +1181,29 @@ async function runPetitionWizard(thread, authorId) {
 
 // LISTENER PARA O BOTÃO DE PETICIONAMENTO E EVENTOS DE INTERAÇÃO
 client.on('interactionCreate', async (interaction) => {
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId === 'modal_oficio') {
+      try {
+        await interaction.deferReply().catch(() => null);
+        const content = interaction.fields.getTextInputValue('oficio_content');
+        const timeStamp = getFormattedDateTime();
+        
+        const movMsg = `=========================================\n` +
+                       `⚖️ **OFÍCIO / ATO ORDINATÓRIO**\n` +
+                       `📅 *Movimentação em: ${timeStamp}*\n\n` +
+                       `> **Determinação Judicial (Juiz <@${interaction.user.id}>):**\n` +
+                       `> ${content.split('\n').join('\n> ')}\n` +
+                       `=========================================`;
+                       
+        await interaction.editReply({ content: movMsg }).catch(() => null);
+      } catch (err) {
+        console.error('Erro ao processar modal de ofício:', err);
+        await interaction.reply({ content: '❌ Ocorreu um erro interno ao processar o ofício.', ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
+  }
+
   if (interaction.isButton()) {
     // REUNIÃO PARA DESPACHO ENTRE JUIZ E ADVOGADO
     if (interaction.customId.startsWith('btn_despacho_')) {
@@ -1116,18 +1289,27 @@ client.on('interactionCreate', async (interaction) => {
           }).catch(() => null);
         }
 
-        // Buscar canais para encontrar a seção de Petições
+        // Buscar canais para encontrar a seção de Petições/Processos
         const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
         const channelsArray = safeGetArray(channels);
-        const peticoesChannel = channelsArray.find(c => c && c.name && matchChannel(c.name, 'petições'));
+        const peticoesChannel = channelsArray.find(c => c && c.name && (
+          matchChannel(c.name, 'petições') || 
+          matchChannel(c.name, 'petição') || 
+          matchChannel(c.name, 'peticao') || 
+          matchChannel(c.name, 'peticionamento') || 
+          matchChannel(c.name, 'processos') || 
+          matchChannel(c.name, 'processo')
+        ));
 
         let threadsArray = [];
         if (peticoesChannel) {
           const active = await peticoesChannel.threads.fetchActive().catch(() => ({ threads: new Map() }));
-          threadsArray = safeGetArray(active.threads).filter(t => t && t.name && (t.name.includes('PROC-') || t.name.includes('🔒 SEGREDO')));
+          const archived = await peticoesChannel.threads.fetchArchived().catch(() => ({ threads: new Map() }));
+          const allThreads = [...safeGetArray(active.threads), ...safeGetArray(archived.threads)];
+          threadsArray = allThreads.filter(t => t && t.name);
         }
 
-        // Se houver processos ativos, mostramos o Select Menu primeiro
+        // Se houver processos ativos ou arquivados, mostramos o Select Menu primeiro
         if (threadsArray.length > 0) {
           const selectMenu = new StringSelectMenuBuilder()
             .setCustomId('select_processo_mandado')
@@ -1154,12 +1336,12 @@ client.on('interactionCreate', async (interaction) => {
           const row = new ActionRowBuilder().addComponents(selectMenu);
 
           await interaction.reply({
-            content: '⚖️ **BNMP:** Selecione a qual processo em `#📜・petições` este mandado de prisão está associado:',
+            content: '⚖️ **BNMP:** Selecione a qual processo este mandado de prisão está associado:',
             components: [row],
             ephemeral: true
           }).catch(() => null);
         } else {
-          // Se não houver nenhum processo ativo, abre o modal direto sem associação
+          // Se não houver nenhum processo na lista, abre o modal direto com campo de link manual
           const modal = new ModalBuilder()
             .setCustomId('modal_registrar_mandado_none')
             .setTitle('Registrar Mandado de Prisão');
@@ -1178,9 +1360,17 @@ client.on('interactionCreate', async (interaction) => {
             .setRequired(true)
             .setPlaceholder('Descreva os motivos e artigos que fundamentam a prisão...');
 
+          const inputProcesso = new TextInputBuilder()
+            .setCustomId('input_processo')
+            .setLabel('Link ou Nº do Processo (Opcional)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setPlaceholder('Copie e cole o link do processo ou número aqui...');
+
           modal.addComponents(
             new ActionRowBuilder().addComponents(inputNome),
-            new ActionRowBuilder().addComponents(inputMotivo)
+            new ActionRowBuilder().addComponents(inputMotivo),
+            new ActionRowBuilder().addComponents(inputProcesso)
           );
 
           await interaction.showModal(modal).catch(err => {
@@ -1194,6 +1384,34 @@ client.on('interactionCreate', async (interaction) => {
           ephemeral: true
         }).catch(() => null);
       }
+      return;
+    }
+
+    if (interaction.customId === 'btn_abrir_oficio') {
+      const guild = interaction.guild;
+      const juizRole = guild.roles.cache.find(r => r.name === 'J. Dir. | Juiz de Direito');
+      const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+      
+      if (!juizRole || !member || !member.roles.cache.has(juizRole.id)) {
+        await interaction.reply({ content: '⚠️ **Acesso Negado:** Apenas Juízes de Direito podem redigir ofícios.', ephemeral: true }).catch(() => null);
+        return;
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId('modal_oficio')
+        .setTitle('Redigir Ofício / Ato');
+
+      const textInput = new TextInputBuilder()
+        .setCustomId('oficio_content')
+        .setLabel('Conteúdo do Ofício / Determinação')
+        .setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder('Digite aqui a determinação judicial...')
+        .setRequired(true);
+
+      const actionRow = new ActionRowBuilder().addComponents(textInput);
+      modal.addComponents(actionRow);
+
+      await interaction.showModal(modal).catch(() => null);
       return;
     }
   }
@@ -1222,9 +1440,17 @@ client.on('interactionCreate', async (interaction) => {
           .setRequired(true)
           .setPlaceholder('Descreva os motivos e artigos que fundamentam a prisão...');
 
+        const inputProcesso = new TextInputBuilder()
+          .setCustomId('input_processo')
+          .setLabel('Link ou Nº do Processo (Opcional)')
+          .setStyle(TextInputStyle.Short)
+          .setRequired(false)
+          .setPlaceholder('Insira o link ou número caso queira customizar...');
+
         modal.addComponents(
           new ActionRowBuilder().addComponents(inputNome),
-          new ActionRowBuilder().addComponents(inputMotivo)
+          new ActionRowBuilder().addComponents(inputMotivo),
+          new ActionRowBuilder().addComponents(inputProcesso)
         );
 
         await interaction.showModal(modal).catch(err => {
@@ -1250,17 +1476,34 @@ client.on('interactionCreate', async (interaction) => {
         const threadId = interaction.customId.includes('_') ? interaction.customId.split('_').pop() : 'none';
         const nome = interaction.fields.getTextInputValue('input_nome');
         const motivo = interaction.fields.getTextInputValue('input_motivo');
+        const inputProcessoVal = interaction.fields.getTextInputValue('input_processo') || '';
 
         const mandadoId = `MP-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
         const timeStamp = getFormattedDateTime();
 
         let threadUrl = "";
         let threadName = "";
+
+        // Se uma thread foi selecionada pelo dropdown
         if (threadId && threadId !== 'none') {
           const thread = await interaction.guild.channels.fetch(threadId).catch(() => null);
           if (thread) {
             threadUrl = thread.url;
             threadName = thread.name;
+          }
+        }
+
+        // Se o usuário preencheu o campo de processo manualmente no modal, dá prioridade a ele
+        if (inputProcessoVal.trim() !== '') {
+          const val = inputProcessoVal.trim();
+          if (val.startsWith('http://') || val.startsWith('https://')) {
+            threadUrl = val;
+            threadName = 'Processo';
+          } else {
+            threadName = val;
+            if (!threadUrl) {
+              threadUrl = val; // Usa o texto como fallback se não houver URL
+            }
           }
         }
 
