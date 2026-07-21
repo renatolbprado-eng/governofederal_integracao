@@ -1,6 +1,8 @@
 import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Collection, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, StringSelectMenuOptionBuilder } from 'discord.js';
 import dotenv from 'dotenv';
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 
 dotenv.config();
 
@@ -331,7 +333,7 @@ async function initializeBNMP(guild) {
       
       const embed = new EmbedBuilder()
         .setTitle('🏛️ BANCO NACIONAL DE MANDADOS DE PRISÃO (BNMP)')
-        .setDescription('Painel de controle para emissão de Mandados de Prisão.\n\nApenas **Juízes de Direito** possuem permissão para registrar mandados.')
+        .setDescription('Painel de controle para emissão de Mandados de Prisão.\n\nApenas **Juízes de Direito** possuem permissão para registrar mandados. Autoridades Policiais podem solicitar a prisão no canal privativo.')
         .setColor(0x2f3136)
         .setTimestamp()
         .setFooter({ text: 'Tribunal de Justiça - Governo Federal' });
@@ -339,8 +341,14 @@ async function initializeBNMP(guild) {
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId('btn_registrar_mandado')
-          .setLabel('Registrar novo Mandado de Prisão')
+          .setLabel('Registrar novo Mandado')
           .setStyle(ButtonStyle.Danger)
+          .setEmoji('🚨'),
+        new ButtonBuilder()
+          .setCustomId('btn_solicitar_prisao')
+          .setLabel('Solicitar prisão (Autoridades Policiais)')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('👮')
       );
 
       const sentMsg = await bnmpChannel.send({ embeds: [embed], components: [row] });
@@ -362,33 +370,185 @@ async function initializeBNMP(guild) {
         }
       }, 2000);
     } else {
-      console.log(`[BNMP] Painel de controle já está presente e fixado no canal #${bnmpChannel.name} de ${guild.name}.`);
+      console.log(`[BNMP] Painel de controle já está presente e fixado no canal #${bnmpChannel.name} de ${guild.name}. Atualizando botões...`);
+      // Garante que o painel possui ambos os botões atualizados
+      const embed = EmbedBuilder.from(setupMessage.embeds[0])
+        .setDescription('Painel de controle para emissão de Mandados de Prisão.\n\nApenas **Juízes de Direito** possuem permissão para registrar mandados. Autoridades Policiais podem solicitar a prisão no canal privativo.');
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_registrar_mandado')
+          .setLabel('Registrar novo Mandado')
+          .setStyle(ButtonStyle.Danger)
+          .setEmoji('🚨'),
+        new ButtonBuilder()
+          .setCustomId('btn_solicitar_prisao')
+          .setLabel('Solicitar prisão (Autoridades Policiais)')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('👮')
+      );
+      await setupMessage.edit({ embeds: [embed], components: [row] }).catch(() => null);
     }
   } catch (err) {
     console.error('[BNMP] Erro ao inicializar canal do BNMP:', err);
   }
 }
+// Inicializa o painel de Precatórios no canal "emitir-precatórios"
+async function initializePrecatorios(guild) {
+  try {
+    const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
+    const channelsArray = safeGetArray(channels);
+    const precatoriosChannel = channelsArray.find(c => c && c.name && (
+      matchChannel(c.name, 'emitir-precatorios') ||
+      matchChannel(c.name, 'emitir-precatórios') ||
+      matchChannel(c.name, 'precatorios') ||
+      matchChannel(c.name, 'precatórios')
+    ));
+
+    if (!precatoriosChannel || !precatoriosChannel.isTextBased()) {
+      console.log(`[Precatórios] Canal "emitir-precatórios" não encontrado no servidor: ${guild.name}`);
+      return;
+    }
+
+    // Busca se já existe o painel enviado pelo bot
+    const messages = await precatoriosChannel.messages.fetch({ limit: 50 }).catch(() => []);
+    const messagesArray = safeGetArray(messages);
+    const botButtonMsg = messagesArray.find(m => 
+      m && m.author && m.author.id === client.user.id && 
+      m.components && m.components.length > 0 && 
+      m.components[0].components.some(comp => comp.customId === 'btn_iniciar_precatorio')
+    );
+
+    if (!botButtonMsg) {
+      console.log(`[Precatórios] Enviando painel de precatórios no canal #${precatoriosChannel.name} de ${guild.name}...`);
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🏛️ SISTEMA NACIONAL DE PRECATÓRIOS')
+        .setDescription(
+          'Utilize o painel abaixo para emitir e certificar ordens de pagamento de precatórios judiciais.\n\n' +
+          '**Instruções:**\n' +
+          '1. Clique no botão **Emitir Precatório**.\n' +
+          '2. Preencha os dados do beneficiário (Discord e Roblox), o valor e a justificativa legal.\n' +
+          '3. A certidão oficial em formato HTML será gerada e anexada automaticamente no canal.'
+        )
+        .setColor(0xd4af37) // Dourado
+        .setTimestamp()
+        .setFooter({ text: 'Tribunal do Governo Federal' });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_iniciar_precatorio')
+          .setLabel('Emitir Precatório')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('📜')
+      );
+
+      const sentMsg = await precatoriosChannel.send({ embeds: [embed], components: [row] }).catch(() => null);
+      if (sentMsg) {
+        // Fixa a mensagem e depois apaga a notificação automática de fixação
+        await sentMsg.pin().catch(() => null);
+        
+        setTimeout(async () => {
+          try {
+            const msgsAfterPin = await precatoriosChannel.messages.fetch({ limit: 10 });
+            const pinSystemMsg = safeGetArray(msgsAfterPin).find(m => m && m.type === 6 && m.reference && m.reference.messageId === sentMsg.id);
+            if (pinSystemMsg) {
+              await pinSystemMsg.delete().catch(() => null);
+            }
+          } catch (e) {
+            console.error('[Precatórios] Erro ao apagar notificação de fixação:', e);
+          }
+        }, 2000);
+      }
+    } else {
+      console.log(`[Precatórios] Painel de precatórios já está presente no canal #${precatoriosChannel.name} de ${guild.name}.`);
+    }
+  } catch (err) {
+    console.error('[Precatórios] Erro ao inicializar canal de precatórios:', err);
+  }
+}
 
 client.once('ready', async () => {
-  console.log(`Bot de Peticionamento conectado com sucesso como: ${client.user.tag}`);
+  console.log(`\n=========================================`);
+  console.log(`🚀 BOT DE INTEGRAÇÃO OPERACIONAL`);
+  console.log(`🤖 Conectado como: ${client.user.tag}`);
+  console.log(`=========================================\n`);
   
   try {
     const guilds = await client.guilds.fetch();
     for (const [guildId] of guilds) {
       const guild = await client.guilds.fetch(guildId);
       
-      // Inicializa o cache de juízes e depois atualiza o relatório
-      await initializeJuizesWorkload(guild).catch(() => null);
-      await updateJuizesWorkload(guild).catch(() => null);
-      await initializeBNMP(guild).catch(() => null);
+      console.log(`⚙️  Inicializando serviços para o servidor: ${guild.name}`);
+      const logs = [];
+
+      // 1. Juízes Workload
+      try {
+        await initializeJuizesWorkload(guild);
+        await updateJuizesWorkload(guild);
+        logs.push(`  ├─ ⚖️  [Juízes Relatório] Cache e Painel sincronizados com sucesso.`);
+      } catch (e) {
+        logs.push(`  ├─ ❌ [Juízes Relatório] Falha na inicialização: ${e.message}`);
+      }
+
+      // 2. Módulo BNMP
+      try {
+        await initializeBNMP(guild);
+        logs.push(`  ├─ 👮 [BNMP] Módulo de Mandados de Prisão verificado/operacional.`);
+      } catch (e) {
+        logs.push(`  ├─ ❌ [BNMP] Falha na inicialização: ${e.message}`);
+      }
+
+      // 3. Módulo Precatórios
+      try {
+        await initializePrecatorios(guild);
+        logs.push(`  └─ 📜 [Precatórios] Painel de Precatórios verificado/operacional.`);
+      } catch (e) {
+        logs.push(`  └─ ❌ [Precatórios] Falha na inicialização: ${e.message}`);
+      }
+
+      // Imprime logs agrupados de canais
+      logs.forEach(log => console.log(log));
+      console.log(`=========================================\n`);
     }
   } catch (err) {
-    console.error('Erro no startup:', err);
+    console.error('❌ Erro no startup:', err);
   }
 });
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
+
+  const content = message.content.trim();
+
+  // COMANDO !OFICIO (Pode ser usado em threads de processos ou no canal bnmp-prisoes)
+  if (content.toLowerCase() === '!oficio') {
+    const isThread = message.channel.isThread();
+    const isBnmpChannel = message.channel.name && matchChannel(message.channel.name, 'bnmp-prisoes');
+
+    if (isThread || isBnmpChannel) {
+      const guild = message.guild;
+      const juizRole = guild.roles.cache.find(r => r.name === 'J. Dir. | Juiz de Direito');
+      
+      // Verifica se quem chamou o comando é Juiz de Direito
+      if (!juizRole || !message.member.roles.cache.has(juizRole.id)) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito com o cargo adequado podem expedir ofícios.').catch(() => null);
+        return;
+      }
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_abrir_oficio')
+          .setLabel('Redigir Ofício')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await message.reply({
+        content: '🏛️ **Ofício Judicial:** Clique no botão abaixo para abrir a caixa de redação do Ofício/Ato Ordinatório.',
+        components: [row]
+      }).catch(() => null);
+      return;
+    }
+  }
 
   // LÓGICA DE REGISTRO DE ADVOGADOS & COMANDO !INTIMAR (Thread do Processo)
   if (message.channel.isThread()) {
@@ -688,30 +848,6 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // COMANDO !OFICIO (Disparo do botão de ofício para o juiz)
-    if (content.toLowerCase() === '!oficio') {
-      const guild = message.guild;
-      const juizRole = guild.roles.cache.find(r => r.name === 'J. Dir. | Juiz de Direito');
-      
-      // Verifica se quem chamou o comando é Juiz de Direito
-      if (!juizRole || !message.member.roles.cache.has(juizRole.id)) {
-        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito com o cargo adequado podem expedir ofícios.').catch(() => null);
-        return;
-      }
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId('btn_abrir_oficio')
-          .setLabel('Redigir Ofício')
-          .setStyle(ButtonStyle.Primary)
-      );
-
-      await message.reply({
-        content: '🏛️ **Ofício Judicial:** Clique no botão abaixo para abrir a caixa de redação do Ofício/Ato Ordinatório.',
-        components: [row]
-      }).catch(() => null);
-      return;
-    }
 
     // COMANDO !PARTES (Adição/Atualização interativa de Partes do processo no card inicial)
     if (content.toLowerCase() === '!partes') {
@@ -848,17 +984,17 @@ client.on('messageCreate', async (message) => {
 });
 
 // Wizard Interativo
-async function runPetitionWizard(thread, authorId) {
+async function runPetitionWizard(thread, authorId, modalData) {
   const data = {
-    type: '',
+    type: modalData ? modalData.type : '',
     isSecret: false,
-    authorName: '',
-    defendantName: '',
+    authorName: modalData ? modalData.authorName : '',
+    defendantName: modalData ? modalData.defendantName : '',
     discordAuthor: null, // Objeto User
     discordDefendant: null, // Objeto User
     discordAuthorRaw: 'Não informado',
     discordDefendantRaw: 'Não informado',
-    petitionText: '',
+    petitionText: modalData ? modalData.petitionText : '',
     petitionAttachments: []
   };
 
@@ -894,33 +1030,39 @@ async function runPetitionWizard(thread, authorId) {
   };
 
   try {
-    // 1. Tipo de Processo (Buttons)
-    const typeRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('type_comum').setLabel('Procedimento Comum').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('type_execucao').setLabel('Execução').setStyle(ButtonStyle.Success)
-    );
+    // 1. Tipo de Processo (Buttons) - Somente se não veio via Modal
+    if (!data.type) {
+      const typeRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('type_comum').setLabel('Procedimento Comum').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('type_execucao').setLabel('Execução').setStyle(ButtonStyle.Success)
+      );
 
-    await thread.send({ content: 'Selecione o **Tipo de Processo**:', components: [typeRow] });
-    const typeInteraction = await thread.awaitMessageComponent({
-      filter: i => i.user.id === authorId,
-      time: 60000
-    }).catch(() => null);
+      await thread.send({ content: 'Selecione o **Tipo de Processo**:', components: [typeRow] });
+      const typeInteraction = await thread.awaitMessageComponent({
+        filter: i => i.user.id === authorId,
+        time: 60000
+      }).catch(() => null);
 
-    if (!typeInteraction) return timeout();
-    data.type = typeInteraction.customId === 'type_comum' ? 'Ação de Procedimento Comum' : 'Ação de Execução';
-    await typeInteraction.reply({ content: `Tipo selecionado: **${data.type}**` });
+      if (!typeInteraction) return timeout();
+      data.type = typeInteraction.customId === 'type_comum' ? 'Ação de Procedimento Comum' : 'Ação de Execução';
+      await typeInteraction.reply({ content: `Tipo selecionado: **${data.type}**` });
+    }
 
     data.isSecret = false;
 
-    // 3. Nome do Autor
-    const authMsg = await askQuestion('Digite o **Nome da parte Autora / Exequente**:');
-    if (!authMsg) return timeout();
-    data.authorName = authMsg.content.trim();
+    // 3. Nome do Autor - Somente se não veio via Modal
+    if (!data.authorName) {
+      const authMsg = await askQuestion('Digite o **Nome da parte Autora / Exequente**:');
+      if (!authMsg) return timeout();
+      data.authorName = authMsg.content.trim();
+    }
 
-    // 4. Nome do Réu
-    const defMsg = await askQuestion('Digite o **Nome da parte Ré / Executada**:');
-    if (!defMsg) return timeout();
-    data.defendantName = defMsg.content.trim();
+    // 4. Nome do Réu - Somente se não veio via Modal
+    if (!data.defendantName) {
+      const defMsg = await askQuestion('Digite o **Nome da parte Ré / Executada**:');
+      if (!defMsg) return timeout();
+      data.defendantName = defMsg.content.trim();
+    }
 
     // 5. Discord do Autor (Opcional)
     const discAuthMsg = await askQuestion('Mencione o Discord da **parte Autora/Exequente** (ex: @pessoa1) (ou digite **"nenhum"** para pular):');
@@ -936,21 +1078,34 @@ async function runPetitionWizard(thread, authorId) {
     data.discordDefendant = parsedDef.user;
     data.discordDefendantRaw = parsedDef.raw;
 
-    // 7. Petição Inicial (Obrigatória - Texto e/ou Anexos)
-    let petitionMsg = null;
-    while (!petitionMsg) {
-      const tempMsg = await askQuestion('Envie a sua **Petição Inicial** (você pode digitar o texto e/ou anexe o arquivo PDF/imagem correspondente):');
-      if (!tempMsg) return timeout();
-      
-      const hasText = tempMsg.content.trim().length > 0;
-      const hasFiles = tempMsg.attachments.size > 0;
-      
-      if (hasText || hasFiles) {
-        petitionMsg = tempMsg;
-        data.petitionText = tempMsg.content.trim() || 'Ver arquivo(s) anexo(s) abaixo.';
-        data.petitionAttachments = tempMsg.attachments.map(a => a.url);
-      } else {
-        await thread.send('⚠️ Você precisa enviar um texto ou um arquivo contendo a petição inicial!');
+    // 7. Petição Inicial ou Anexos
+    if (!modalData) {
+      let petitionMsg = null;
+      while (!petitionMsg) {
+        const tempMsg = await askQuestion('Envie a sua **Petição Inicial** (você pode digitar o texto e/ou anexe o arquivo PDF/imagem correspondente):');
+        if (!tempMsg) return timeout();
+        
+        const hasText = tempMsg.content.trim().length > 0;
+        const hasFiles = tempMsg.attachments.size > 0;
+        
+        if (hasText || hasFiles) {
+          petitionMsg = tempMsg;
+          data.petitionText = tempMsg.content.trim() || 'Ver arquivo(s) anexo(s) abaixo.';
+          data.petitionAttachments = tempMsg.attachments.map(a => a.url);
+        } else {
+          await thread.send('⚠️ Você precisa enviar um texto ou um arquivo contendo a petição inicial!');
+        }
+      }
+    } else {
+      // Se veio via modal, o texto principal já foi capturado. Perguntamos apenas sobre arquivos/anexos (opcional)
+      const anexoMsg = await askQuestion('Deseja anexar arquivos (PDFs, imagens) à sua petição inicial? Envie os arquivos agora ou digite **"pular"** para concluir:');
+      if (anexoMsg) {
+        const contentStr = anexoMsg.content.trim().toLowerCase();
+        if (contentStr !== 'pular' && contentStr !== 'nenhum' && contentStr !== 'não' && contentStr !== 'nao') {
+          if (anexoMsg.attachments.size > 0) {
+            data.petitionAttachments = anexoMsg.attachments.map(a => a.url);
+          }
+        }
       }
     }
 
@@ -1151,6 +1306,7 @@ async function runPetitionWizard(thread, authorId) {
             `Olá! Você está sendo formalmente citado(a) no processo **${processId}** (${data.type}) autuado no Tribunal.\n\n` +
             `* **Servidor (Discord):** **${guild.name}**\n` +
             `* **Canal/Thread:** <#${targetThread.id}> (#[${targetThread.name}])\n` +
+            `* **Classe Processual:** ${data.type}\n` +
             `* **Autor/Exequente:** ${data.authorName}\n` +
             `* **Réu/Executado:** ${data.defendantName}\n\n` +
             `**O que fazer:**\n` +
@@ -1196,9 +1352,162 @@ client.on('interactionCreate', async (interaction) => {
                        `=========================================`;
                        
         await interaction.editReply({ content: movMsg }).catch(() => null);
+
+        // Pergunta sobre a DM de forma efêmera no chat da thread
+        await interaction.followUp({
+          content: '⚖️ **Ofício Judicial:** Deseja notificar alguém por DM privada? Mencione os usuários (ex: @pessoa1, @pessoa2) ou digite **"nenhum"** para concluir:',
+          ephemeral: true
+        }).catch(() => null);
+
+        const filter = m => m.author.id === interaction.user.id;
+        const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 60000, errors: ['time'] }).catch(() => null);
+
+        if (collected && collected.size > 0) {
+          const userMsg = collected.first();
+          const contentMsg = userMsg.content.trim().toLowerCase();
+
+          if (contentMsg !== 'nenhum' && contentMsg !== 'nao' && contentMsg !== 'não' && contentMsg !== 'pular') {
+            const userIds = [...userMsg.content.matchAll(/<@!?(\d+)>/g)].map(m => m[1]);
+            if (userIds.length > 0) {
+              const dmNotify = `🏛️ **NOTIFICAÇÃO DE OFÍCIO JUDICIAL**\n\n` +
+                               `Prezado(a), você está sendo notificado(a) sobre a expedição de um Ofício/Ato Judicial.\n\n` +
+                               `**Teor do Ofício:**\n` +
+                               `> ${content.split('\n').join('\n> ')}\n\n` +
+                               `* **Origem:** Processo na thread <#${interaction.channel.id}>\n` +
+                               `* **Expedido por:** Juiz <@${interaction.user.id}>`;
+
+              for (const userId of userIds) {
+                try {
+                  const targetUser = await client.users.fetch(userId).catch(() => null);
+                  if (targetUser) {
+                    await targetUser.send(dmNotify).catch(() => null);
+                  }
+                } catch (dmErr) {
+                  console.warn(`[Ofício DM] Falha ao notificar usuário ${userId}:`, dmErr);
+                }
+              }
+            }
+          }
+          // Deleta a mensagem do juiz para limpar o chat
+          await userMsg.delete().catch(() => null);
+        }
       } catch (err) {
         console.error('Erro ao processar modal de ofício:', err);
         await interaction.reply({ content: '❌ Ocorreu um erro interno ao processar o ofício.', ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
+
+    if (interaction.customId === 'modal_peticionamento') {
+      try {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+        const channel = interaction.channel;
+        const thread = await channel.threads.create({
+          name: `Petição - ${interaction.user.username}`,
+          autoArchiveDuration: 60,
+          type: ChannelType.PrivateThread,
+          reason: `Peticionamento eletrônico iniciado por ${interaction.user.tag}`,
+        });
+
+        await thread.members.add(interaction.user.id);
+        await thread.send(`Olá <@${interaction.user.id}>! Iniciando o peticionamento eletrônico com base nas informações enviadas.`);
+
+        const pet_tipo = interaction.fields.getTextInputValue('pet_tipo');
+        const pet_autor = interaction.fields.getTextInputValue('pet_autor');
+        const pet_reu = interaction.fields.getTextInputValue('pet_reu');
+        const pet_texto = interaction.fields.getTextInputValue('pet_texto');
+
+        const modalData = {
+          type: pet_tipo,
+          authorName: pet_autor,
+          defendantName: pet_reu,
+          petitionText: pet_texto
+        };
+
+        // Chama o wizard reduzido passando os dados coletados do modal
+        runPetitionWizard(thread, interaction.user.id, modalData);
+
+        await interaction.editReply({ content: `✅ Thread privada criada com sucesso: <#${thread.id}>! Acesse o canal para concluir o peticionamento.` }).catch(() => null);
+      } catch (err) {
+        console.error('Erro ao processar modal de peticionamento:', err);
+        await interaction.reply({ content: '❌ Ocorreu um erro interno ao criar a petição.', ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
+
+    if (interaction.customId === 'modal_emitir_precatorio') {
+      try {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+        
+        const robloxUser = interaction.fields.getTextInputValue('prec_roblox');
+        const valor = interaction.fields.getTextInputValue('prec_valor');
+        const justificativa = interaction.fields.getTextInputValue('prec_justificativa');
+        const autoridade = interaction.user.tag;
+        const autoridadeMention = `<@${interaction.user.id}>`;
+        
+        // Pergunta o Discord do beneficiário no chat
+        await interaction.editReply({
+          content: `⚖️ **Precatórios:** Para finalizar, mencione o Discord de quem receberá o precatório (ex: @pessoa1) ou digite **"nenhum"** para pular.`
+        }).catch(() => null);
+
+        const filter = m => m.author.id === interaction.user.id;
+        const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 60000, errors: ['time'] }).catch(() => null);
+        
+        let discordUser = 'Não informado';
+        if (collected && collected.size > 0) {
+          const userMsg = collected.first();
+          const contentMsg = userMsg.content.trim().toLowerCase();
+          
+          if (contentMsg !== 'nenhum' && contentMsg !== 'nao' && contentMsg !== 'não' && contentMsg !== 'pular') {
+            const mentioned = userMsg.mentions.users.first();
+            discordUser = mentioned ? `<@${mentioned.id}>` : userMsg.content.trim();
+          }
+          
+          // Apaga a mensagem digitada pelo usuário para deixar o canal limpo
+          await userMsg.delete().catch(() => null);
+        }
+
+        const precId = `PREC-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+        const timeStampStr = getFormattedDateTime();
+        
+        const embed = new EmbedBuilder()
+          .setTitle('📜 CERTIDÃO DE PRECATÓRIO JUDICIAL')
+          .setDescription(
+            `**TRIBUNAL DE JUSTIÇA DO GOVERNO FEDERAL**\n` +
+            `*Certificamos a constituição e homologação do seguinte precatório judicial:*`
+          )
+          .setColor(0xd4af37) // Dourado
+          .addFields(
+            { name: '📂 Protocolo de Registro', value: `\`${precId}\``, inline: true },
+            { name: '⚖️ Autoridade Emissora', value: autoridadeMention, inline: true },
+            { name: '💰 Valor Homologado', value: `**${valor}**`, inline: true },
+            { name: '👤 Beneficiário (Roblox)', value: `\`${robloxUser}\``, inline: true },
+            { name: '💬 Beneficiário (Discord)', value: discordUser, inline: true },
+            { name: '📝 Justificativa Legal / Motivo', value: justificativa },
+            { name: '🚥 Status do Título', value: '🟡 **PENDENTE DE PAGAMENTO**', inline: false },
+            { name: '📅 Data de Autuação', value: timeStampStr, inline: false }
+          )
+          .setTimestamp()
+          .setFooter({ text: 'Sistema Nacional de Controle de Precatórios • Brasília-DF' });
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`btn_baixar_precatorio_${precId}`)
+            .setLabel('Dar Baixa por Pagamento')
+            .setStyle(ButtonStyle.Success)
+            .setEmoji('💸')
+        );
+        
+        await interaction.channel.send({
+          embeds: [embed],
+          components: [row]
+        });
+        
+        await interaction.editReply({ content: `✅ **Sucesso:** Precatório emitido com sucesso! Protocolo: \`${precId}\`.` }).catch(() => null);
+      } catch (err) {
+        console.error('Erro no modal de precatório:', err);
+        await interaction.editReply({ content: '❌ Ocorreu um erro interno ao gerar o precatório.' }).catch(() => null);
       }
       return;
     }
@@ -1249,26 +1558,49 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.customId === 'btn_peticionar') {
       try {
-        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+        const modal = new ModalBuilder()
+          .setCustomId('modal_peticionamento')
+          .setTitle('Peticionamento Eletrônico');
 
-        const channel = interaction.channel;
-        const thread = await channel.threads.create({
-          name: `Petição - ${interaction.user.username}`,
-          autoArchiveDuration: 60,
-          type: ChannelType.PrivateThread,
-          reason: `Peticionamento eletrônico iniciado por ${interaction.user.tag}`,
-        });
+        const inputTipo = new TextInputBuilder()
+          .setCustomId('pet_tipo')
+          .setLabel('Tipo de Processo (Comum ou Execução)')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Ex: Procedimento Comum')
+          .setRequired(true);
 
-        await thread.members.add(interaction.user.id);
-        await thread.send(`Olá <@${interaction.user.id}>! Iniciando seu peticionamento eletrônico confidencial.`);
-        
-        runPetitionWizard(thread, interaction.user.id);
+        const inputAutor = new TextInputBuilder()
+          .setCustomId('pet_autor')
+          .setLabel('Nome da Parte Autora (Exequente)')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Ex: Maria Silva')
+          .setRequired(true);
 
-        await interaction.editReply({ content: `✅ Thread privada criada com sucesso: <#${thread.id}>!` }).catch(() => null);
+        const inputReu = new TextInputBuilder()
+          .setCustomId('pet_reu')
+          .setLabel('Nome da Parte Ré (Executada)')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Ex: João Souza')
+          .setRequired(true);
 
+        const inputTexto = new TextInputBuilder()
+          .setCustomId('pet_texto')
+          .setLabel('Petição Inicial (Texto / Fatos)')
+          .setStyle(TextInputStyle.Paragraph)
+          .setPlaceholder('Descreva os fatos e fundamentos da sua petição inicial...')
+          .setRequired(true);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(inputTipo),
+          new ActionRowBuilder().addComponents(inputAutor),
+          new ActionRowBuilder().addComponents(inputReu),
+          new ActionRowBuilder().addComponents(inputTexto)
+        );
+
+        await interaction.showModal(modal).catch(() => null);
       } catch (err) {
-        console.error('Erro ao iniciar petição via botão:', err);
-        await interaction.followUp({ content: 'Ocorreu um erro ao tentar criar a thread privada. Certifique-se de que o bot tem permissão de "Criar Threads Privadas" no canal.', ephemeral: true }).catch(() => null);
+        console.error('Erro ao abrir modal de peticionamento:', err);
+        await interaction.reply({ content: '❌ Ocorreu um erro interno ao abrir o formulário de petição.', ephemeral: true }).catch(() => null);
       }
       return;
     }
@@ -1408,10 +1740,244 @@ client.on('interactionCreate', async (interaction) => {
         .setPlaceholder('Digite aqui a determinação judicial...')
         .setRequired(true);
 
-      const actionRow = new ActionRowBuilder().addComponents(textInput);
-      modal.addComponents(actionRow);
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(textInput)
+      );
 
       await interaction.showModal(modal).catch(() => null);
+      return;
+    }
+
+    if (interaction.customId === 'btn_iniciar_precatorio') {
+      const guild = interaction.guild;
+      const member = interaction.member;
+
+      try {
+        const roles = await guild.roles.fetch().catch(() => guild.roles.cache);
+        const juizRole = roles.find(r => r.name === 'J. Dir. | Juiz de Direito');
+
+        if (!juizRole || !member.roles.cache.has(juizRole.id)) {
+          await interaction.reply({ content: '⚠️ **Acesso Negado:** Apenas Juízes de Direito com o cargo adequado podem emitir precatórios.', ephemeral: true }).catch(() => null);
+          return;
+        }
+
+        const modal = new ModalBuilder()
+          .setCustomId('modal_emitir_precatorio')
+          .setTitle('Emitir Precatório Judicial');
+
+        const inputRoblox = new TextInputBuilder()
+          .setCustomId('prec_roblox')
+          .setLabel('Quem receberá: Nome no Roblox (Obrigatório)')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Ex: Joaozinho_BR')
+          .setRequired(true);
+
+        const inputValor = new TextInputBuilder()
+          .setCustomId('prec_valor')
+          .setLabel('Valor do Precatório (R$)')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Ex: R$ 500.000,00')
+          .setRequired(true);
+
+        const inputJustificativa = new TextInputBuilder()
+          .setCustomId('prec_justificativa')
+          .setLabel('Justificativa Legal / Motivo')
+          .setStyle(TextInputStyle.Paragraph)
+          .setPlaceholder('Insira os fundamentos legais da emissão do precatório...')
+          .setRequired(true);
+
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(inputRoblox),
+          new ActionRowBuilder().addComponents(inputValor),
+          new ActionRowBuilder().addComponents(inputJustificativa)
+        );
+
+        await interaction.showModal(modal).catch(() => null);
+      } catch (err) {
+        console.error('Erro ao abrir modal de precatório:', err);
+        await interaction.reply({ content: '❌ Ocorreu um erro interno ao abrir o formulário.', ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
+
+    if (interaction.customId.startsWith('btn_baixar_precatorio_')) {
+      const precId = interaction.customId.replace('btn_baixar_precatorio_', '');
+      const guild = interaction.guild;
+      const member = interaction.member;
+
+      try {
+        const roles = await guild.roles.fetch().catch(() => guild.roles.cache);
+        const juizRole = roles.find(r => r.name === 'J. Dir. | Juiz de Direito');
+
+        // Proteção: apenas Juiz de Direito pode dar baixa
+        if (!juizRole || !member.roles.cache.has(juizRole.id)) {
+          return interaction.reply({
+            content: '⚠️ **Acesso Negado:** Apenas Juízes de Direito com o cargo adequado podem dar baixa em precatórios.',
+            ephemeral: true
+          }).catch(() => null);
+        }
+
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+        // Recupera o embed da mensagem original
+        const message = interaction.message;
+        if (!message || message.embeds.length === 0) {
+          await interaction.editReply({ content: '❌ Erro: Não foi possível recuperar a certidão original.' }).catch(() => null);
+          return;
+        }
+
+        const originalEmbed = message.embeds[0];
+        
+        // Deleta a mensagem antiga
+        await message.delete().catch(() => null);
+
+        // Cria o embed atualizado marcado como PAGO / DADO BAIXA
+        const timeStampStr = getFormattedDateTime();
+        const updatedFields = originalEmbed.fields.map(f => {
+          if (f.name.includes('Status do Título')) {
+            return { name: f.name, value: '🟢 **PAGO / DADO BAIXA**', inline: f.inline };
+          }
+          return f;
+        });
+
+        // Adiciona um campo de auditoria informando quem deu baixa e a data
+        updatedFields.push({
+          name: '👮 Auditoria de Pagamento',
+          value: `Baixa efetuada por <@${interaction.user.id}> em ${timeStampStr}.`,
+          inline: false
+        });
+
+        const updatedEmbed = EmbedBuilder.from(originalEmbed)
+          .setTitle('📜 CERTIDÃO DE PRECATÓRIO - PAGO / DADO BAIXA')
+          .setColor(0xe74c3c) // Vermelho
+          .setFields(updatedFields);
+
+        // Publica no mesmo canal a certidão atualizada sem botões
+        await interaction.channel.send({
+          embeds: [updatedEmbed]
+        });
+
+        await interaction.editReply({ content: `✅ **Sucesso:** Baixa registrada com sucesso para o precatório \`${precId}\`!` }).catch(() => null);
+      } catch (err) {
+        console.error('Erro ao dar baixa em precatório:', err);
+        await interaction.followUp({ content: '❌ Ocorreu um erro interno ao registrar o pagamento do precatório.', ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
+
+    if (interaction.customId === 'btn_solicitar_prisao') {
+      try {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+        const guild = interaction.guild;
+        const channel = interaction.channel;
+
+        // Cria a thread privada de solicitação
+        const thread = await channel.threads.create({
+          name: `Solicitação-Prisão-${interaction.user.username}`,
+          autoArchiveDuration: 1440,
+          type: ChannelType.PrivateThread,
+          reason: `Solicitação de prisão iniciada por ${interaction.user.tag}`
+        });
+
+        // Adiciona o solicitante
+        await thread.members.add(interaction.user.id);
+
+        // Busca e adiciona os juízes
+        const roles = await guild.roles.fetch().catch(() => guild.roles.cache);
+        const juizRole = roles.find(r => r.name === 'J. Dir. | Juiz de Direito');
+        if (juizRole) {
+          const members = await guild.members.fetch().catch(() => guild.members.cache);
+          const juizes = members.filter(m => m.roles.cache.has(juizRole.id));
+          for (const [id, member] of juizes) {
+            await thread.members.add(id).catch(() => null);
+          }
+        }
+
+        // Mensagem de boas-vindas na thread
+        const welcomeMsg = `👮 **SOLICITAÇÃO DE MANDADO DE PRISÃO**\n\n` +
+                           `Esta thread privativa foi aberta para discussão sobre a solicitação de prisão feita pela Autoridade Policial <@${interaction.user.id}>.\n\n` +
+                           `* **Solicitante:** <@${interaction.user.id}>\n` +
+                           `* **Magistrados Designados:** ${juizRole ? `<@&${juizRole.id}>` : 'Não configurado'}\n\n` +
+                           `<@${interaction.user.id}>, envie aqui as informações sobre o acusado, os motivos/crimes, link do processo correspondente e provas para análise judicial.`;
+
+        await thread.send(welcomeMsg).catch(() => null);
+
+        await interaction.editReply({ content: `✅ **Sucesso:** Sala de discussão privada criada: <#${thread.id}>!` }).catch(() => null);
+      } catch (err) {
+        console.error('Erro ao processar solicitação de prisão:', err);
+        await interaction.followUp({ content: '❌ Ocorreu um erro interno ao criar a sala privada de solicitação.', ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
+
+    if (interaction.customId.startsWith('btn_baixar_mandado_')) {
+      const mandadoId = interaction.customId.replace('btn_baixar_mandado_', '');
+      const guild = interaction.guild;
+      const member = interaction.member;
+
+      try {
+        const roles = await guild.roles.fetch().catch(() => guild.roles.cache);
+        const juizRole = roles.find(r => r.name === 'J. Dir. | Juiz de Direito');
+
+        // Apenas juiz de direito pode dar baixa
+        if (!juizRole || !member.roles.cache.has(juizRole.id)) {
+          return interaction.reply({
+            content: '⚠️ **Acesso Negado:** Apenas Juízes de Direito com o cargo adequado podem revogar ou dar baixa em mandados de prisão.',
+            ephemeral: true
+          }).catch(() => null);
+        }
+
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+        const message = interaction.message;
+        if (!message || message.embeds.length === 0) {
+          await interaction.editReply({ content: '❌ Erro: Não foi possível recuperar o mandado original.' }).catch(() => null);
+          return;
+        }
+
+        const originalEmbed = message.embeds[0];
+        
+        // Deleta o mandado antigo
+        await message.delete().catch(() => null);
+
+        // Atualiza a barra lateral para vermelho e marca como revogado
+        const timeStampStr = getFormattedDateTime();
+        
+        const updatedEmbed = EmbedBuilder.from(originalEmbed)
+          .setTitle('👮 MANDADO DE PRISÃO - REVOGADO / DADO BAIXA')
+          .setColor(0xe74c3c) // Vermelho
+          .addFields({
+            name: '🔓 Revogação / Baixa',
+            value: `Mandado revogado por Juiz <@${interaction.user.id}> em ${timeStampStr}.`,
+            inline: false
+          });
+
+        // Se a mensagem original possuía botões (como "Ir para o Processo"), nós mantemos o link do processo mas removemos o botão de dar baixa!
+        let components = [];
+        if (message.components && message.components.length > 0) {
+          const actionRow = message.components[0];
+          // Procura se tem algum botão link de processo
+          const linkButton = actionRow.components.find(c => c.style === 5); // 5 = ButtonStyle.Link em d.js v14
+          if (linkButton) {
+            const newRow = new ActionRowBuilder().addComponents(
+              ButtonBuilder.from(linkButton)
+            );
+            components = [newRow];
+          }
+        }
+
+        // Publica no mesmo canal o mandado atualizado
+        await interaction.channel.send({
+          embeds: [updatedEmbed],
+          components: components
+        });
+
+        await interaction.editReply({ content: `✅ **Sucesso:** Mandado de prisão \`${mandadoId}\` revogado/baixado com sucesso!` }).catch(() => null);
+      } catch (err) {
+        console.error('Erro ao dar baixa em mandado:', err);
+        await interaction.followUp({ content: '❌ Ocorreu um erro interno ao registrar a baixa do mandado.', ephemeral: true }).catch(() => null);
+      }
       return;
     }
   }
@@ -1538,17 +2104,29 @@ client.on('interactionCreate', async (interaction) => {
           openWarrants.shift();
         }
 
-        // Se houver processo, envia a mensagem com o botão de link no Discord
+        // Se houver processo, envia a mensagem com os botões de link e baixa no Discord
         if (threadUrl !== "") {
           const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
               .setLabel('Ir para o Processo')
               .setStyle(ButtonStyle.Link)
-              .setURL(threadUrl)
+              .setURL(threadUrl),
+            new ButtonBuilder()
+              .setCustomId(`btn_baixar_mandado_${mandadoId}`)
+              .setLabel('Dar Baixa em Mandado')
+              .setStyle(ButtonStyle.Danger)
+              .setEmoji('🔓')
           );
           await interaction.channel.send({ embeds: [embed], components: [row] });
         } else {
-          await interaction.channel.send({ embeds: [embed] });
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`btn_baixar_mandado_${mandadoId}`)
+              .setLabel('Dar Baixa em Mandado')
+              .setStyle(ButtonStyle.Danger)
+              .setEmoji('🔓')
+          );
+          await interaction.channel.send({ embeds: [embed], components: [row] });
         }
 
         await interaction.editReply({
