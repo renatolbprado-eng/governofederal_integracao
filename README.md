@@ -1,82 +1,68 @@
-# 🏛️ Bot de Peticionamento Eletrônico & Atos Judiciais
+# 🏛️ Bot de Peticionamento Eletrônico, Atos Judiciais, Precatórios & BNMP
 
-Este bot do Discord foi desenvolvido para automatizar o protocolo de petições judiciais, controle de privacidade de processos (Segredo de Justiça), citação/intimação automática de partes e procuradores via DM, e gerenciamento de permissões de cargos.
-
-O código foi projetado para ser modular, facilitando a **transposição para qualquer outro contexto** de atendimento, RPG, ou fluxos administrativos.
+Este bot para Discord foi desenvolvido em Node.js (Discord.js v14) para integrar e automatizar por completo os fluxos de trabalho de um Tribunal de Justiça/Poder Judiciário virtual.
 
 ---
 
-## 📋 Como Transpor para Outros Contextos
+## 📚 Visão Geral das Funcionalidades
 
-O bot pode ser facilmente adaptado para outros cenários de triagem e notificações. Abaixo estão exemplos de adaptação e onde alterar no código:
+O sistema é dividido em módulos operacionais específicos:
 
-### Exemplo 1: Ouvidoria ou Fale Conosco Municipal
-* **Contexto**: Triagem de reclamações e denúncias de cidadãos para secretarias de uma prefeitura.
-* **Onde adaptar no [index.js](file:///c:/Users/renat/Documents/Projeto_Roblox/index.js)**:
-  1. No questionário `runPetitionWizard`, mude os botões para selecionar secretarias (ex: "Saúde", "Obras", "Segurança").
-  2. Modifique os campos do Embed final para listar: *Cidadão*, *Secretaria Alvo*, *Descrição do Problema*.
-  3. No startup, altere as `keywords` de cargos para liberar o canal a secretários e assessores (ex: `['secretário', 'assessor', 'prefeito', 'ouvidor']`).
-  4. Modifique o comando `!intimar` para `!notificar` as secretarias envolvidas.
+### ⚖️ 1. Peticionamento Eletrônico & Autuação Processual
+- **Peticionamento via Pop-up (Modal):** No canal `#peticionamento-eletrônico`, o botão `Peticionar` abre o formulário `modal_peticionamento` para coleta instantânea do *Tipo de Processo*, *Nome do Autor*, *Nome do Réu* e *Texto/Fatos da Petição Inicial*.
+- **Triagem na Thread Privada:** O bot cria uma thread privada exclusiva do processo (`Petição - NomeDoUsuario`), onde solicita interativamente a menção dos Discords do Autor e do Réu `(ex: @pessoa1)` e o envio de documentos/anexos.
+- **Autuação Oficial:** Gera o Card Oficial do Processo com número de protocolo único `PROC-AAAA-XXXX` e realiza a citação direta por DM.
 
-### Exemplo 2: Delegacia e Inquérito Policial (RPG Policial)
-* **Contexto**: Registro de Boletins de Ocorrência (B.O.) e instauração de Inquéritos Policiais privados.
-* **Onde adaptar no [index.js](file:///c:/Users/renat/Documents/Projeto_Roblox/index.js)**:
-  1. No wizard, pergunte pelo *Tipo de Ocorrência* (ex: "Furto", "Agressão") e se o inquérito é sob sigilo.
-  2. Altere os cargos marcados automaticamente na movimentação para `@Delegado` e `@Investigador`.
-  3. Altere o prefixo `ADVOGADOS:` para `INVESTIGADORES:` ou `POLICIAIS:` para vincular os agentes que comandam a investigação ao embed de B.O.
+### 👥 2. Gestão de Partes e Procuradores
+- **`!adv` (Registro de Procuradores):** Comando executado dentro da thread do processo. Abre seletores para vincular advogados ao polo ativo (Autor) ou passivo (Réu) e gera o Ato Ordinatório de Registro de Procuradores.
+- **`!partes` (Vinculação de Partes):** Associa ou atualiza a conta do Discord do Autor ou do Réu na autuação do processo e concede acesso automático à thread.
+- **`!intimar` (Citação e Intimação por DM):** Envia DMs diretas aos envolvidos cadastrados.
 
----
+### 👨‍⚖️ 3. Ferramentas Exclusivas dos Juízes de Direito
+- **`!segredo` (Decretar Segredo de Justiça):** Restrito a membros com cargo `J. Dir. | Juiz de Direito`. Converte a causa em sigilosa, criando uma thread privativa de Segredo de Justiça (`🔒 SEGREDO - PROC-XXXX`), adicionando apenas o Juiz, as partes e os advogados habilitados.
+- **`!oficio` (Expedição de Ofício / Ato Ordinatório):** Funciona em threads de processos ou no canal `👮🏻・bnmp-prisões`. O Juiz clica em `Redigir Ofício` para abrir o formulário pop-up. Ao submeter, publica o Ato Ordinatório e pergunta no chat se deseja notificar usuários por DM privada `(ex: @pessoa1)`.
+- **Despacho com o Juiz (Audiência Privada):** Cria sala privativa para audiências urgentes e despachos entre o solicitante e o Magistrado designado.
 
-## ⚙️ Estrutura de Configurações no Código
+### 📜 4. Sistema Nacional de Precatórios
+- **Painel Automático (`🛠️・emitir-precatórios` / `🛠️・execjud`):** Fixa mensagem institucional com botão `Emitir Precatório` (restrito a Juízes de Direito).
+- **Formulário & Certidão:** Coleta o Roblox, Valor e Justificativa no Modal, e solicita a menção do beneficiário `(ex: @pessoa1)` no chat. Gera um **Embed Dourado** (`#d4af37`) oficial.
+- **Dar Baixa por Pagamento:** Botão na certidão que permite ao Juiz dar baixa no título. Apaga a certidão original e emite uma nova certidão em tom **Vermelho** (`#e74c3c`) com status `PAGO / DADO BAIXA` e auditoria de quem pagou e a data.
 
-### 1. Palavras-Chave de Cargos (Permissões de Acesso)
-No startup, o bot localiza e adiciona permissões ao canal para quem possui cargos judiciais.
-Você pode configurar quais cargos devem ter acesso editando a lista `keywords` no evento `clientReady`:
-```javascript
-const keywords = [
-  'juiz', 'promotor', 'magistrado', 'defensor', 'procurador', 
-  'advogado', 'judiciário', 'desembargador', 'cartório', 'escrivão'
-];
-```
-*Adicione ou remova termos em minúsculo para adequar ao seu servidor.*
-
-### 2. Customizando as Perguntas do Wizard
-Para adicionar, alterar ou remover campos de perguntas (como telefone, provas, etc.), edite a função `runPetitionWizard`:
-1. Adicione a propriedade no objeto `data`:
-   ```javascript
-   const data = {
-     type: '',
-     myNewField: '', // Adicione aqui
-     ...
-   };
-   ```
-2. Crie a pergunta usando a função `askQuestion`:
-   ```javascript
-   const resMsg = await askQuestion('Digite a resposta para a nova pergunta:');
-   if (!resMsg) return timeout();
-   data.myNewField = resMsg.content.trim();
-   ```
-3. Exiba o novo dado inserindo-o nos campos (`fields`) do `EmbedBuilder`.
-
-### 3. Sincronização Dinâmica (Comandos de Chat nas Threads)
-* **`!adv`**: Abre o fluxo interativo no chat via botões para selecionar o polo (Autor ou Réu) e registrar os respectivos advogados na autuação inicial (Embed), limpando o chat em seguida.
-* **`!intimar [todos/autores/requeridos]`**: Lê os envolvidos direto no Embed (incluindo advogados de cada polo) e envia DMs automáticas notificando-os de movimentações pendentes de atuação.
-* **`!segredo`**: Comando exclusivo para Juízes de Direito em threads de processos. Transforma o processo em sigiloso, movendo a autuação para uma thread privada, adicionando apenas os envolvidos e advogados, e deletando a thread pública original.
+### 👮 5. Banco Nacional de Mandados de Prisão (BNMP)
+- **Painel Automático (`👮🏻・bnmp-prisões`):** Contém os botões `Registrar novo Mandado` (Juízes) e `Solicitar prisão (Autoridades Policiais)` (Qualquer membro).
+- **Solicitar Prisão (Autoridades Policiais):** Abre instantaneamente uma thread privada de discussão sigilosa adicionando o policial solicitante e **todos os Juízes de Direito** do servidor.
+- **Dar Baixa em Mandado:** Todos os mandados contêm o botão `Dar Baixa em Mandado` (Juízes). Ao revogar, converte o título para o status `REVOGADO / DADO BAIXA` em tom **Vermelho** (`#e74c3c`) com auditoria.
 
 ---
 
-## 🚀 Instalação e Execução
+## 🛠️ Nomes de Canais Reconhecidos (Helper Resiliente)
 
-1. Certifique-se de que possui o **Node.js** (v16 ou superior) instalado.
-2. Configure o arquivo `.env` na raiz do projeto com o seu Token do Discord:
+O bot utiliza a função `matchChannel` que ignora maiúsculas/minúsculas, acentos e emojis para localizar os canais do servidor:
+
+| Função do Canal | Exemplo de Nome no Discord |
+| :--- | :--- |
+| **Peticionamento** | `#peticionamento-eletrônico`, `#petições` |
+| **Relatório de Juízes** | `⚖️・juízes`, `#juizes` |
+| **Mandados de Prisão** | `👮🏻・bnmp-prisões`, `#bnmp-prisoes` |
+| **Precatórios / Execução** | `🛠️・emitir-precatórios`, `🛠️・execjud`, `#precatórios` |
+| **Manual de Uso** | `📘・manual-de-uso`, `#manual-de-uso` |
+
+---
+
+## 🔑 Cargos e Permissões
+
+- **`J. Dir. | Juiz de Direito`**: Cargo exigido para expedir `!oficio`, decretar `!segredo`, emitir e dar baixa em precatórios e mandados de prisão.
+- **Advogados & Partes**: Possuem acesso aos comandos `!adv` e `!partes` nas threads de seus processos.
+- **Autoridades Policiais**: Possuem acesso ao botão `Solicitar prisão` no canal de BNMP.
+
+---
+
+## 🚀 Como Rodar o Projeto
+
+1. Instalar dependências: `npm install`
+2. Configurar o arquivo `.env`:
    ```env
-   DISCORD_TOKEN=seu_token_aqui
+   DISCORD_TOKEN=SeuTokenAqui
+   PORT=3000
    ```
-3. Instale as dependências:
-   ```bash
-   npm install
-   ```
-4. Execute o bot localmente:
-   ```bash
-   npm start
-   ```
+3. Iniciar o servidor: `npm start`

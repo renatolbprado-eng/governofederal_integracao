@@ -467,6 +467,148 @@ async function initializePrecatorios(guild) {
   }
 }
 
+// Inicializa e mantém atualizado o manual completo no canal "manual-de-uso"
+async function initializeManualDeUso(guild) {
+  try {
+    const channels = await guild.channels.fetch().catch(() => guild.roles.cache);
+    const channelsArray = safeGetArray(channels);
+    const manualChannel = channelsArray.find(c => c && c.name && (
+      matchChannel(c.name, 'manual-de-uso') ||
+      matchChannel(c.name, 'manual') ||
+      matchChannel(c.name, 'manual-uso')
+    ));
+
+    if (!manualChannel || !manualChannel.isTextBased()) {
+      return;
+    }
+
+    // Busca mensagens fixadas ou recentes enviadas pelo bot no canal
+    const pinnedMessages = await manualChannel.messages.fetchPinned().catch(() => null);
+    let setupMessage = null;
+    if (pinnedMessages) {
+      setupMessage = safeGetArray(pinnedMessages).find(m => 
+        m.author.id === client.user.id && 
+        m.embeds && 
+        m.embeds.some(e => e.title && e.title.includes('MANUAL OFICIAL'))
+      );
+    }
+
+    // Construção dos Embeds do Manual
+    const embedHeader = new EmbedBuilder()
+      .setTitle('📘 MANUAL OFICIAL DE USO DO BOT JUDICIAL')
+      .setDescription(
+        `Bem-vindo ao sistema integrado do Poder Judiciário!\n` +
+        `Este canal traz o guia completo de utilização do bot, com todas as funções disponíveis divididas por perfil de usuário.\n\n` +
+        `---`
+      )
+      .setColor(0x1a365d);
+
+    const embedAdvogados = new EmbedBuilder()
+      .setTitle('⚖️ 1. MANUAL DOS ADVOGADOS & PROCURADORES')
+      .setColor(0x2f3136)
+      .addFields(
+        { 
+          name: '📝 Peticionamento Eletrônico', 
+          value: `• **Onde:** Canal \`#peticionamento-eletrônico\`.\n` +
+                 `• **Quem pode usar:** Qualquer Advogado/Procurador.\n` +
+                 `• **Como funciona:** Clique no botão **"Peticionar"**. Preencha o Modal com o *Tipo de Processo*, *Autor*, *Réu* e a *Petição Inicial (Fatos)*. O bot criará uma thread privativa e solicitará a menção dos Discords \`(ex: @pessoa1)\` e o upload de anexos/provas.`
+        },
+        { 
+          name: '👥 Habilitação de Procuradores (!adv)', 
+          value: `• **Onde:** Dentro da thread (sala) do processo autuado.\n` +
+                 `• **Quem pode usar:** Advogados das partes.\n` +
+                 `• **Como funciona:** Digite \`!adv\` no chat do processo. Selecione se é Advogado do Autor ou do Réu no botão e mencione o Discord dos advogados \`(ex: @adv1 @adv2)\`. O bot cadastrará os advogados na autuação e emitirá o **Ato Ordinatório de Procuradores**.`
+        },
+        { 
+          name: '🤝 Audiência de Despacho', 
+          value: `• **Onde:** Painel de Magistrados / Despachos.\n` +
+                 `• **Quem pode usar:** Advogados e Solicitantes.\n` +
+                 `• **Como funciona:** Clique no botão de despacho e selecione o Juiz designado. O bot abrirá uma sala privativa temporária para alinhar providências urgentes e despachos.`
+        }
+      );
+
+    const embedPartes = new EmbedBuilder()
+      .setTitle('👤 2. MANUAL DAS PARTES (AUTOR & RÉU)')
+      .setColor(0x2f3136)
+      .addFields(
+        { 
+          name: '🔗 Cadastro e Vinculação de Partes (!partes)', 
+          value: `• **Onde:** Dentro da thread do processo.\n` +
+                 `• **Quem pode usar:** Partes ou Advogados.\n` +
+                 `• **Como funciona:** Digite \`!partes\` na thread. Selecione se é Parte Autora ou Ré e mencione o Discord da parte \`(ex: @cliente1)\`. O bot atualiza a autuação inicial e concede acesso à thread.`
+        },
+        { 
+          name: '🔔 Citação e Intimação Automática', 
+          value: `• **Como funciona:** Ao ser citado no processo, o bot envia uma notificação direta por mensagem privada (DM) contendo o número do processo, link da thread e orientações de defesa.`
+        }
+      );
+
+    const embedJuizes = new EmbedBuilder()
+      .setTitle('👨‍⚖️ 3. MANUAL DOS JUÍZES DE DIREITO & MAGISTRADOS')
+      .setColor(0xd4af37)
+      .addFields(
+        { 
+          name: '🔒 Segredo de Justiça (!segredo)', 
+          value: `• **Onde:** Na thread do processo.\n` +
+                 `• **Quem pode usar:** Apenas Juízes de Direito.\n` +
+                 `• **Como funciona:** Digite \`!segredo\`. O bot converterá a causa em sigilosa, criando uma thread privativa de Segredo de Justiça, adicionando apenas o Juiz, as partes e os advogados cadastrados.`
+        },
+        { 
+          name: '📜 Expedição de Ofício / Ato Ordinatório (!oficio)', 
+          value: `• **Onde:** Em threads de processos ou no canal \`👮🏻・bnmp-prisões\`.\n` +
+                 `• **Quem pode usar:** Apenas Juízes de Direito.\n` +
+                 `• **Como funciona:** Digite \`!oficio\` e clique em **"Redigir Ofício"**. Digite a determinação no formulário. Ao enviar, o bot publica a movimentação oficial e pergunta no chat se deseja notificar usuários via DM privada \`(ex: @pessoa1)\`.`
+        },
+        { 
+          name: '💰 Emissão e Baixa de Precatórios', 
+          value: `• **Onde:** Canal \`🛠️・emitir-precatórios\` (ou \`🛠️・execjud\` / \`precatórios\`).\n` +
+                 `• **Quem pode usar:** Apenas Juízes de Direito.\n` +
+                 `• **Como funciona:** Clique em **"Emitir Precatório"**, preencha o formulário e informe o Discord do beneficiário no chat. Gera uma certidão dourada. Para registrar pagamento, clique em **"Dar Baixa por Pagamento"** (converte a certidão para tom vermelho com status PAGO e auditoria).`
+        },
+        { 
+          name: '🚨 Mandados de Prisão (BNMP)', 
+          value: `• **Onde:** Canal \`👮🏻・bnmp-prisões\`.\n` +
+                 `• **Quem pode usar:** Apenas Juízes de Direito.\n` +
+                 `• **Como funciona:** Clique em **"Registrar novo Mandado"**, selecione o processo ou informe o acusado e leis. Publica o mandado com botão de baixa. Ao revogar, o botão **"Dar Baixa em Mandado"** converte a ordem para o status REVOGADO em tom vermelho.`
+        }
+      );
+
+    const embedPolicia = new EmbedBuilder()
+      .setTitle('👮 4. AUTORIDADES POLICIAIS & SOLICITAÇÃO DE PRISÃO')
+      .setColor(0xd9534f)
+      .addFields(
+        { 
+          name: '🚔 Solicitar Prisão (Autoridades Policiais)', 
+          value: `• **Onde:** Canal \`👮🏻・bnmp-prisões\`.\n` +
+                 `• **Quem pode usar:** Autoridades Policiais / Qualquer membro.\n` +
+                 `• **Como funciona:** Clique em **"Solicitar prisão (Autoridades Policiais)"**. O bot criará uma thread privada adicionando o policial solicitante e **todos os Juízes de Direito** do servidor para debate sigiloso e envio de provas.`
+        }
+      )
+      .setFooter({ text: 'Tribunal de Justiça • Manual Oficial do Bot' })
+      .setTimestamp();
+
+    const embedsArray = [embedHeader, embedAdvogados, embedPartes, embedJuizes, embedPolicia];
+
+    if (!setupMessage) {
+      const sentMsg = await manualChannel.send({ embeds: embedsArray }).catch(() => null);
+      if (sentMsg) {
+        await sentMsg.pin().catch(() => null);
+        setTimeout(async () => {
+          try {
+            const sysMsgs = await manualChannel.messages.fetch({ limit: 10 });
+            const pinMsg = safeGetArray(sysMsgs).find(m => m && m.type === 6 && m.reference && m.reference.messageId === sentMsg.id);
+            if (pinMsg) await pinMsg.delete().catch(() => null);
+          } catch (e) {}
+        }, 2000);
+      }
+    } else {
+      await setupMessage.edit({ embeds: embedsArray }).catch(() => null);
+    }
+  } catch (err) {
+    console.error('[Manual de Uso] Erro ao inicializar canal do manual:', err);
+  }
+}
+
 client.once('ready', async () => {
   console.log(`\n=========================================`);
   console.log(`🚀 BOT DE INTEGRAÇÃO OPERACIONAL`);
@@ -501,9 +643,17 @@ client.once('ready', async () => {
       // 3. Módulo Precatórios
       try {
         await initializePrecatorios(guild);
-        logs.push(`  └─ 📜 [Precatórios] Painel de Precatórios verificado/operacional.`);
+        logs.push(`  ├─ 📜 [Precatórios] Painel de Precatórios verificado/operacional.`);
       } catch (e) {
-        logs.push(`  └─ ❌ [Precatórios] Falha na inicialização: ${e.message}`);
+        logs.push(`  ├─ ❌ [Precatórios] Falha na inicialização: ${e.message}`);
+      }
+
+      // 4. Módulo Manual de Uso
+      try {
+        await initializeManualDeUso(guild);
+        logs.push(`  └─ 📘 [Manual de Uso] Guia Oficial verificado/atualizado com sucesso.`);
+      } catch (e) {
+        logs.push(`  └─ ❌ [Manual de Uso] Falha na inicialização: ${e.message}`);
       }
 
       // Imprime logs agrupados de canais
