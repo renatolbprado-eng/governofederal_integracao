@@ -3,8 +3,19 @@ import dotenv from 'dotenv';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
+
+// Inicialização da IA Gemini (se a chave estiver no .env)
+let ai = null;
+if (process.env.GEMINI_API_KEY) {
+  try {
+    ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  } catch (e) {
+    console.error('Erro ao inicializar o cliente Gemini:', e);
+  }
+}
 
 // Cache global em memória para a carga de trabalho dos juízes
 const juizWorkloadsCache = {};
@@ -669,6 +680,105 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
   const content = message.content.trim();
+
+  // COMANDO !GLOBO (Envio de mensagem formatada para Tupper no canal 💬・chat)
+  if (content.toLowerCase().startsWith('!globo')) {
+    const textArg = content.slice(6).trim();
+    const channels = await message.guild?.channels.fetch().catch(() => message.guild?.channels.cache);
+    const channelsArray = safeGetArray(channels);
+    const chatChannel = channelsArray.find(c => c && c.isTextBased() && (
+      c.name === '💬・chat' ||
+      c.name === 'chat' ||
+      matchChannel(c.name, 'chat')
+    ));
+
+    if (!chatChannel) {
+      await message.reply('❌ **Erro:** Canal `💬・chat` não foi encontrado no servidor.').catch(() => null);
+      return;
+    }
+
+    if (textArg) {
+      await chatChannel.send(`globo:${textArg}`).catch(err => {
+        console.error('Erro ao enviar mensagem globo:', err);
+      });
+
+      const confirmMsg = await message.reply(`✅ Mensagem enviada para o canal <#${chatChannel.id}>!`).catch(() => null);
+      setTimeout(() => {
+        message.delete().catch(() => null);
+        if (confirmMsg) confirmMsg.delete().catch(() => null);
+      }, 4000);
+      return;
+    } else {
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_abrir_globo')
+          .setLabel('Redigir Mensagem Globo')
+          .setStyle(ButtonStyle.Primary)
+          .setEmoji('📺')
+      );
+
+      await message.reply({
+        content: `📺 **Mensagem Globo:** Clique no botão abaixo para abrir a caixa de redação e enviar sua mensagem para o canal <#${chatChannel.id}>:`,
+        components: [row]
+      }).catch(() => null);
+      return;
+    }
+  }
+
+  // COMANDO !IA ou !GEMINI (Integração com a API Gratuita do Google Gemini)
+  if (content.toLowerCase().startsWith('!ia') || content.toLowerCase().startsWith('!gemini') || message.mentions.has(client.user)) {
+    let prompt = '';
+    if (content.toLowerCase().startsWith('!ia')) {
+      prompt = content.slice(3).trim();
+    } else if (content.toLowerCase().startsWith('!gemini')) {
+      prompt = content.slice(7).trim();
+    } else {
+      prompt = content.replace(`<@${client.user.id}>`, '').replace(`<@!${client.user.id}>`, '').trim();
+    }
+
+    if (!prompt) {
+      await message.reply('🤖 **Gemini IA:** Digite sua pergunta após o comando! Exemplo: `!ia O que é um precatório?`').catch(() => null);
+      return;
+    }
+
+    if (!process.env.GEMINI_API_KEY) {
+      await message.reply('⚠️ **Configuração Pendente:** A chave `GEMINI_API_KEY` não está configurada no arquivo `.env`. Crie sua chave gratuita no [Google AI Studio](https://aistudio.google.com/).').catch(() => null);
+      return;
+    }
+
+    try {
+      const typingMsg = await message.reply('🤖 *Gemini pensando na resposta...*').catch(() => null);
+
+      if (!ai) {
+        ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      }
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+
+      const responseText = response.text || 'Não recebi uma resposta válida do modelo.';
+
+      if (responseText.length <= 1900) {
+        if (typingMsg) {
+          await typingMsg.edit({ content: responseText }).catch(() => null);
+        } else {
+          await message.reply(responseText).catch(() => null);
+        }
+      } else {
+        if (typingMsg) await typingMsg.delete().catch(() => null);
+        const chunks = responseText.match(/[\s\S]{1,1900}/g) || [responseText];
+        for (const chunk of chunks) {
+          await message.channel.send(chunk).catch(() => null);
+        }
+      }
+    } catch (err) {
+      console.error('Erro na IA Gemini:', err);
+      await message.reply(`❌ Ocorreu um erro na IA Gemini: ${err.message || err}`).catch(() => null);
+    }
+    return;
+  }
 
   // COMANDO !OFICIO (Pode ser usado em threads de processos ou no canal bnmp-prisoes)
   if (content.toLowerCase() === '!oficio') {
@@ -1548,6 +1658,36 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (interaction.customId === 'modal_globo') {
+      try {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+        const textContent = interaction.fields.getTextInputValue('globo_content').trim();
+
+        const channels = await interaction.guild.channels.fetch().catch(() => interaction.guild.channels.cache);
+        const channelsArray = safeGetArray(channels);
+        const chatChannel = channelsArray.find(c => c && c.isTextBased() && (
+          c.name === '💬・chat' ||
+          c.name === 'chat' ||
+          matchChannel(c.name, 'chat')
+        ));
+
+        if (!chatChannel) {
+          await interaction.editReply({ content: '❌ **Erro:** Canal `💬・chat` não foi encontrado no servidor.' }).catch(() => null);
+          return;
+        }
+
+        await chatChannel.send(`globo:${textContent}`).catch(err => {
+          console.error('Erro ao enviar mensagem globo:', err);
+        });
+
+        await interaction.editReply({ content: `✅ **Sucesso:** Mensagem enviada para o canal <#${chatChannel.id}>!` }).catch(() => null);
+      } catch (err) {
+        console.error('Erro ao processar modal_globo:', err);
+        await interaction.reply({ content: '❌ Ocorreu um erro interno ao enviar a mensagem.', ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
+
     if (interaction.customId === 'modal_peticionamento') {
       try {
         await interaction.deferReply({ ephemeral: true }).catch(() => null);
@@ -1664,6 +1804,28 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isButton()) {
+    if (interaction.customId === 'btn_abrir_globo') {
+      try {
+        const modal = new ModalBuilder()
+          .setCustomId('modal_globo')
+          .setTitle('Enviar Mensagem (Globo)');
+
+        const textInput = new TextInputBuilder()
+          .setCustomId('globo_content')
+          .setLabel('Conteúdo da Mensagem')
+          .setStyle(TextInputStyle.Paragraph)
+          .setPlaceholder('Digite aqui o texto para o Tupper globo:text...')
+          .setRequired(true);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(textInput));
+        await interaction.showModal(modal).catch(() => null);
+      } catch (err) {
+        console.error('Erro ao abrir modal globo:', err);
+        await interaction.reply({ content: '❌ Ocorreu um erro interno ao abrir o formulário.', ephemeral: true }).catch(() => null);
+      }
+      return;
+    }
+
     // REUNIÃO PARA DESPACHO ENTRE JUIZ E ADVOGADO
     if (interaction.customId.startsWith('btn_despacho_')) {
       const juizId = interaction.customId.replace('btn_despacho_', '');
