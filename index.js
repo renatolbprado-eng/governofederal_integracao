@@ -771,20 +771,38 @@ client.on('messageCreate', async (message) => {
       let responseText = null;
       let lastErrorMsg = '';
 
+      const extractCleanText = (data) => {
+        if (!data || !data.candidates || data.candidates.length === 0) return null;
+        const candidate = data.candidates[0];
+        if (!candidate || !candidate.content || !candidate.content.parts) return null;
+        const realParts = candidate.content.parts.filter(p => !p.thought && p.text && p.text.trim());
+        if (realParts.length > 0) {
+          return realParts.map(p => p.text).join('\n').trim();
+        }
+        const lastPart = candidate.content.parts.filter(p => p.text).pop();
+        return lastPart ? lastPart.text.trim() : null;
+      };
+
+      const requestBody = JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        systemInstruction: {
+          parts: [{ text: 'Você é uma inteligência artificial assistente amigável no Discord. Responda sempre diretamente ao usuário de forma clara e natural em português, sem incluir rascunhos, opções ou análises internas de pensamento.' }]
+        }
+      });
+
       // 2. Testa a chamada REST no v1beta
       for (const model of allModelsToTry) {
         try {
           const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }]
-            })
+            body: requestBody
           });
 
           const data = await res.json();
-          if (res.ok && data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
-            responseText = data.candidates[0].content.parts[0].text;
+          const cleanText = extractCleanText(data);
+          if (res.ok && cleanText) {
+            responseText = cleanText;
             break;
           } else if (data.error) {
             lastErrorMsg = data.error.message || JSON.stringify(data.error);
@@ -801,13 +819,12 @@ client.on('messageCreate', async (message) => {
             const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }]
-              })
+              body: requestBody
             });
             const data = await res.json();
-            if (res.ok && data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
-              responseText = data.candidates[0].content.parts[0].text;
+            const cleanText = extractCleanText(data);
+            if (res.ok && cleanText) {
+              responseText = cleanText;
               break;
             }
           } catch (e) {}
