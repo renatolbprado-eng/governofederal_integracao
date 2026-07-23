@@ -749,31 +749,73 @@ client.on('messageCreate', async (message) => {
     try {
       const typingMsg = await message.reply('🤖 *Gemini pensando na resposta...*').catch(() => null);
 
-      if (!ai) {
-        ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      }
+      const apiKey = process.env.GEMINI_API_KEY;
+      let availableModels = [];
 
-      const candidateModels = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest', 'gemini-1.5-pro'];
+      // 1. Tenta listar dinamicamente os modelos ativos da chave do usuário (ListModels)
+      try {
+        const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`).catch(() => null);
+        if (listRes && listRes.ok) {
+          const listData = await listRes.json().catch(() => null);
+          if (listData && listData.models) {
+            availableModels = listData.models
+              .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
+              .map(m => m.name.replace('models/', ''));
+          }
+        }
+      } catch (e) {}
+
+      const candidateDefaults = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+      const allModelsToTry = [...new Set([...availableModels, ...candidateDefaults])];
+
       let responseText = null;
-      let lastError = null;
+      let lastErrorMsg = '';
 
-      for (const modelName of candidateModels) {
+      // 2. Testa a chamada REST no v1beta
+      for (const model of allModelsToTry) {
         try {
-          const response = await ai.models.generateContent({
-            model: modelName,
-            contents: prompt,
+          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }]
+            })
           });
-          if (response && response.text) {
-            responseText = response.text;
+
+          const data = await res.json();
+          if (res.ok && data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
+            responseText = data.candidates[0].content.parts[0].text;
             break;
+          } else if (data.error) {
+            lastErrorMsg = data.error.message || JSON.stringify(data.error);
           }
         } catch (err) {
-          lastError = err;
+          lastErrorMsg = err.message || err;
+        }
+      }
+
+      // 3. Fallback no v1 estável se v1beta não tiver retornado
+      if (!responseText) {
+        for (const model of ['gemini-1.5-flash', 'gemini-2.0-flash']) {
+          try {
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }]
+              })
+            });
+            const data = await res.json();
+            if (res.ok && data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
+              responseText = data.candidates[0].content.parts[0].text;
+              break;
+            }
+          } catch (e) {}
         }
       }
 
       if (!responseText) {
-        throw lastError || new Error('Nenhum modelo do Gemini respondeu à requisição.');
+        throw new Error(lastErrorMsg || 'Nenhum modelo respondeu para esta chave de API.');
       }
 
       if (responseText.length <= 1900) {
