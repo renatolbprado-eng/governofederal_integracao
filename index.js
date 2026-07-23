@@ -753,12 +753,28 @@ client.on('messageCreate', async (message) => {
         ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       }
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-1.5-flash',
-        contents: prompt,
-      });
+      const candidateModels = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest', 'gemini-1.5-pro'];
+      let responseText = null;
+      let lastError = null;
 
-      const responseText = response.text || 'Não recebi uma resposta válida do modelo.';
+      for (const modelName of candidateModels) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: prompt,
+          });
+          if (response && response.text) {
+            responseText = response.text;
+            break;
+          }
+        } catch (err) {
+          lastError = err;
+        }
+      }
+
+      if (!responseText) {
+        throw lastError || new Error('Nenhum modelo do Gemini respondeu à requisição.');
+      }
 
       if (responseText.length <= 1900) {
         if (typingMsg) {
