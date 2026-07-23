@@ -2311,28 +2311,25 @@ client.on('interactionCreate', async (interaction) => {
         const timeStamp = getFormattedDateTime();
 
         let threadUrl = "";
-        let threadName = "";
+        let processDisplay = "";
 
         // Se uma thread foi selecionada pelo dropdown
         if (threadId && threadId !== 'none') {
           const thread = await interaction.guild.channels.fetch(threadId).catch(() => null);
           if (thread) {
             threadUrl = thread.url;
-            threadName = thread.name;
+            processDisplay = `[${thread.name}](${thread.url})`;
           }
         }
 
-        // Se o usuário preencheu o campo de processo manualmente no modal, dá prioridade a ele
+        // Se o usuário preencheu o campo de processo manualmente no modal, dá prioridade
         if (inputProcessoVal.trim() !== '') {
           const val = inputProcessoVal.trim();
           if (val.startsWith('http://') || val.startsWith('https://')) {
             threadUrl = val;
-            threadName = 'Processo';
+            processDisplay = `[Processo](${val})`;
           } else {
-            threadName = val;
-            if (!threadUrl) {
-              threadUrl = val; // Usa o texto como fallback se não houver URL
-            }
+            processDisplay = val;
           }
         }
 
@@ -2349,8 +2346,8 @@ client.on('interactionCreate', async (interaction) => {
           .setTimestamp()
           .setFooter({ text: 'Banco Nacional de Mandados de Prisão' });
 
-        if (threadUrl !== "") {
-          embed.addFields({ name: '📜 Processo Associado', value: `[${threadName}](${threadUrl})`, inline: false });
+        if (processDisplay !== "") {
+          embed.addFields({ name: '📜 Processo Associado', value: processDisplay, inline: false });
         }
 
         latestWarrant = {
@@ -2367,30 +2364,26 @@ client.on('interactionCreate', async (interaction) => {
           openWarrants.shift();
         }
 
-        // Se houver processo, envia a mensagem com os botões de link e baixa no Discord
-        if (threadUrl !== "") {
-          const row = new ActionRowBuilder().addComponents(
+        const hasValidUrl = threadUrl.startsWith('http://') || threadUrl.startsWith('https://');
+
+        const row = new ActionRowBuilder();
+        if (hasValidUrl) {
+          row.addComponents(
             new ButtonBuilder()
               .setLabel('Ir para o Processo')
               .setStyle(ButtonStyle.Link)
-              .setURL(threadUrl),
-            new ButtonBuilder()
-              .setCustomId(`btn_baixar_mandado_${mandadoId}`)
-              .setLabel('Dar Baixa em Mandado')
-              .setStyle(ButtonStyle.Danger)
-              .setEmoji('🔓')
+              .setURL(threadUrl)
           );
-          await interaction.channel.send({ embeds: [embed], components: [row] });
-        } else {
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId(`btn_baixar_mandado_${mandadoId}`)
-              .setLabel('Dar Baixa em Mandado')
-              .setStyle(ButtonStyle.Danger)
-              .setEmoji('🔓')
-          );
-          await interaction.channel.send({ embeds: [embed], components: [row] });
         }
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(`btn_baixar_mandado_${mandadoId}`)
+            .setLabel('Dar Baixa em Mandado')
+            .setStyle(ButtonStyle.Danger)
+            .setEmoji('🔓')
+        );
+
+        await interaction.channel.send({ embeds: [embed], components: [row] });
 
         await interaction.editReply({
           content: '✅ **Mandado de Prisão expedido e publicado com sucesso no canal!**'
