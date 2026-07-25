@@ -1,63 +1,77 @@
-# 🏛️ Bot de Peticionamento Eletrônico, Atos Judiciais, Precatórios & BNMP
+# 🏛️ Bot Unificado: Poder Judiciário (Governo Federal), Corregedoria-Geral, Polícia Federal, PM & RONE
 
-Este bot para Discord foi desenvolvido em Node.js (Discord.js v14) para integrar e automatizar por completo os fluxos de trabalho de um Tribunal de Justiça/Poder Judiciário virtual.
+Este bot para Discord foi desenvolvido em Node.js (Discord.js v14) para integrar e automatizar por completo o ecossistema de Justiça e Segurança Pública virtual entre múltiplos servidores.
 
 ---
 
 ## 📚 Visão Geral das Funcionalidades
 
-O sistema é dividido em módulos operacionais específicos:
-
-### ⚖️ 1. Peticionamento Eletrônico & Autuação Processual
-- **Peticionamento via Pop-up (Modal):** No canal `#peticionamento-eletrônico`, o botão `Peticionar` abre o formulário `modal_peticionamento` para coleta instantânea do *Tipo de Processo*, *Nome do Autor*, *Nome do Réu* e *Texto/Fatos da Petição Inicial*.
+### ⚖️ 1. Peticionamento Eletrônico & Autuação Processual (Governo Federal)
+- **Peticionamento via Pop-up (Modal):** No canal `#peticionamento-eletrônico` (ID `1142251068890304522`), o botão `Peticionar` abre o formulário `modal_peticionamento` para coleta instantânea do *Tipo de Processo*, *Nome do Autor*, *Nome do Réu* e *Texto/Fatos da Petição Inicial*.
 - **Triagem na Thread Privada:** O bot cria uma thread privada exclusiva do processo (`Petição - NomeDoUsuario`), onde solicita interativamente a menção dos Discords do Autor e do Réu `(ex: @pessoa1)` e o envio de documentos/anexos.
-- **Autuação Oficial:** Gera o Card Oficial do Processo com número de protocolo único `PROC-AAAA-XXXX` e realiza a citação direta por DM.
+- **Autuação Oficial & Sorteio de Juiz:** Gera o Card Oficial do Processo com número de protocolo único `PROC-AAAA-XXXX`, realiza a citação direta por DM e atualiza o relatório dinâmico de carga de trabalho dos Juízes de Direito.
 
-### 👥 2. Gestão de Partes e Procuradores
-- **`!adv` (Registro de Procuradores):** Comando executado dentro da thread do processo. Abre seletores para vincular advogados ao polo ativo (Autor) ou passivo (Réu) e gera o Ato Ordinatório de Registro de Procuradores.
-- **`!partes` (Vinculação de Partes):** Associa ou atualiza a conta do Discord do Autor ou do Réu na autuação do processo e concede acesso automático à thread.
-- **`!intimar` (Citação e Intimação por DM):** Envia DMs diretas aos envolvidos cadastrados.
+---
 
-### 👨‍⚖️ 3. Ferramentas Exclusivas dos Juízes de Direito
-- **`!segredo` (Decretar Segredo de Justiça):** Restrito a membros com cargo `J. Dir. | Juiz de Direito`. Converte a causa em sigilosa, criando uma thread privativa de Segredo de Justiça (`🔒 SEGREDO - PROC-XXXX`), adicionando apenas o Juiz, as partes e os advogados habilitados.
-- **`!oficio` (Expedição de Ofício / Ato Ordinatório):** Funciona em threads de processos ou no canal `👮🏻・bnmp-prisões`. O Juiz clica em `Redigir Ofício` para abrir o formulário pop-up. Ao submeter, publica o Ato Ordinatório e pergunta no chat se deseja notificar usuários por DM privada `(ex: @pessoa1)`.
-- **Despacho com o Juiz (Audiência Privada):** Cria sala privativa para audiências urgentes e despachos entre o solicitante e o Magistrado designado.
+### 🌐 2. Sistema Triangulado de Mandados de Prisão (3-Way Bridge)
+- **Triangulação Automática:** Requisições de mandados iniciadas na Corregedoria (`#pedido-de-mandado`), Polícia Federal (`「📑」solicitar-mandado`) ou Governo Federal geram 3 salas privadas espelhadas simultaneamente.
+- **Sincronização em Tempo Real:** Mensagens, prints e documentos enviados em qualquer uma das 3 salas são retransmitidos instantaneamente com badge de origem (`💬 [Corregedoria-Geral]`, `🚨 [Polícia Federal - PF]`, `⚖️ [Governo Federal / Magistratura]`).
+- **Comunicação Interna Privativa (`!setup-comunicacao`):** Permite abrir mandados triangulados no canal `🛠️・comunicação-interna` marcando apenas o solicitante (sem notificar todos os juízes).
+- **Encerramento Unificado (`!encerrar`):** Permite aos Magistrados/Autoridades encerrar e excluir simultaneamente as 3 salas integradas após conclusão.
 
-### 📜 4. Sistema Nacional de Precatórios
-- **Painel Automático (`🛠️・emitir-precatórios` / `🛠️・execjud`):** Fixa mensagem institucional com botão `Emitir Precatório` (restrito a Juízes de Direito).
-- **Formulário & Certidão:** Coleta o Roblox, Valor e Justificativa no Modal, e solicita a menção do beneficiário `(ex: @pessoa1)` no chat. Gera um **Embed Dourado** (`#d4af37`) oficial.
-- **Dar Baixa por Pagamento:** Botão na certidão que permite ao Juiz dar baixa no título. Apaga a certidão original e emite uma nova certidão em tom **Vermelho** (`#e74c3c`) com status `PAGO / DADO BAIXA` e auditoria de quem pagou e a data.
+---
 
-### 👮 5. Banco Nacional de Mandados de Prisão (BNMP)
-- **Painel Automático (`👮🏻・bnmp-prisões`):** Contém os botões `Registrar novo Mandado` (Juízes) e `Solicitar prisão (Autoridades Policiais)` (Qualquer membro).
-- **Solicitar Prisão (Autoridades Policiais):** Abre instantaneamente uma thread privada de discussão sigilosa adicionando o policial solicitante e **todos os Juízes de Direito** do servidor.
-- **Dar Baixa em Mandado:** Todos os mandados contêm o botão `Dar Baixa em Mandado` (Juízes). Ao revogar, converte o título para o status `REVOGADO / DADO BAIXA` em tom **Vermelho** (`#e74c3c`) com auditoria.
+### 👮 3. Banco Nacional de Mandados de Prisão (BNMP) & Transmissão Externa
+- **Painel Automático (`👮🏻・bnmp-prisões`):** Contém os botões `Registrar novo Mandado` (Juízes de Direito) e `Solicitar prisão` (Autoridades Policiais).
+- **Emissão & Transmissão Externa:** Mandados expedidos no Governo Federal publicam o cartão ativo no BNMP e transmitem automaticamente a cópia aos canais da **Polícia Federal** e **Corregedoria**.
+- **Baixa no BNMP & Limpeza Externa:** Ao dar baixa no BNMP (Governo Federal), o bot gera a sombra/relatório de revogação no Governo e **deleta automaticamente** a cópia nos canais da PF e Corregedoria.
+
+---
+
+### 📢 4. Anúncios de Repercussão Geral & Anúncios Anônimos (Corregedoria)
+- **Broadcast para Multi-Corporações (`!setup-repercussao`):** Anúncios de Repercussão Geral publicados na Corregedoria são transmitidos automaticamente para a **PM** (`「📢」・comunicados`), **PF** (`「📣」anúncios`) e **RONE** (`📣┃avisos-rone`) com imagens embutidas nativas.
+- **Criador de Anúncios Anônimos (`!anuncio`):** Permite selecionar de 1 a 5 canais de destino via menu suspenso nativo e publicar mensagens secretas sem deixar rastro.
+
+---
+
+### 👥 5. Gestão Processual & Notificações (Corregedoria)
+- **`!adv @usuario1...`**: Nomeia procuradores/advogados de defesa e concede acesso aos autos.
+- **`!reu @usuario1...`**: Cadastra réus no polo passivo do processo.
+- **`!intimar`**: Notifica oficialmente réus e advogados via DM privada com link direto do processo.
+
+---
+
+### 📜 6. Sistema Nacional de Precatórios & Relatório de Juízes
+- **Precatórios Judiciais (`🛠️・emitir-precatórios`):** Emissão de títulos homologados e baixa por pagamento com auditoria.
+- **Relatório de Juízes (`⚖️・juízes`):** Monitoramento em tempo real da distribuição de processos e agendamento de despachos em salas privadas.
 
 ---
 
 ## 🛠️ Nomes de Canais Reconhecidos (Helper Resiliente)
 
-O bot utiliza a função `matchChannel` que ignora maiúsculas/minúsculas, acentos e emojis para localizar os canais do servidor:
-
 | Função do Canal | Exemplo de Nome no Discord |
 | :--- | :--- |
-| **Peticionamento** | `#peticionamento-eletrônico`, `#petições` |
+| **Peticionamento (Governo)** | `#peticionamento-eletrônico` (ID: `1142251068890304522`) |
 | **Relatório de Juízes** | `⚖️・juízes`, `#juizes` |
-| **Mandados de Prisão** | `👮🏻・bnmp-prisões`, `#bnmp-prisoes` |
-| **Precatórios / Execução** | `🛠️・emitir-precatórios`, `🛠️・execjud`, `#precatórios` |
-| **Manual de Uso** | `📘・manual-de-uso`, `#manual-de-uso` |
+| **BNMP (Governo Federal)** | `👮🏻・bnmp-prisões`, `#bnmp-prisoes` |
+| **Comunicação Interna** | `🛠️・comunicação-interna` |
+| **Precatórios** | `🛠️・emitir-precatórios`, `#precatórios` |
+| **Mandados (PF)** | `「📑」solicitar-mandado` (Guild ID: `1524888239746318557`) |
+| **Mandados (Corregedoria)** | `#pedido-de-mandado` |
+| **Denúncias (Corregedoria)** | `#denuncias`, `⚖️ CORREGEDORIA DENÚNCIAS` |
+| **Comunicados PM** | `「📢」・comunicados` (Guild ID: `1526698673403072572`) |
+| **Avisos RONE** | `📣┃avisos-rone` (Guild ID: `1525137517710540860`) |
 
 ---
 
-## 🔑 Cargos e Permissões
+## 📘 Guia de Restauração e Recuperação do Zero
 
-- **`J. Dir. | Juiz de Direito`**: Cargo exigido para expedir `!oficio`, decretar `!segredo`, emitir e dar baixa em precatórios e mandados de prisão.
-- **Advogados & Partes**: Possuem acesso aos comandos `!adv` e `!partes` nas threads de seus processos.
-- **Autoridades Policiais**: Possuem acesso ao botão `Solicitar prisão` no canal de BNMP.
+Em caso de recriação de servidores ou perda de canais, consulte o guia passo a passo em:
+📄 **[`MANUAL_CONFIGURACAO_COMPLETA.md`](file:///C:/Users/renat/Documents/GovernoFederal_bot/MANUAL_CONFIGURACAO_COMPLETA.md)**
 
 ---
 
-## 🚀 Como Rodar o Projeto
+## 🚀 Como Executar o Bot
 
 1. Instalar dependências: `npm install`
 2. Configurar o arquivo `.env`:
@@ -65,4 +79,4 @@ O bot utiliza a função `matchChannel` que ignora maiúsculas/minúsculas, acen
    DISCORD_TOKEN=SeuTokenAqui
    PORT=3000
    ```
-3. Iniciar o servidor: `npm start`
+3. Iniciar o bot: `node index.js`
