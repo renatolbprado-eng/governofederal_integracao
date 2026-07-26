@@ -1343,13 +1343,12 @@ client.on('messageCreate', async (message) => {
 
   // LÓGICA DE REGISTRO DE ADVOGADOS & COMANDOS EM THREADS DE PROCESSO
   if (message.channel.isThread()) {
-    // Adição automática de membros em threads de Autos Sigilosos por menção
+    // Adição automática de membros em threads de Autos Sigilosos por menção (silenciosa)
     if (message.channel.name.includes('AUTOS SIGILOSOS')) {
       if (message.mentions && message.mentions.users.size > 0) {
         for (const [userId, user] of message.mentions.users) {
           if (!user.bot && userId !== client.user.id) {
             await message.channel.members.add(userId).catch(() => null);
-            await message.channel.send(`🔓 **Acesso Concedido:** <@${userId}> recebeu acesso a esta sala de autos sigilosos por ter sido mencionado por <@${message.author.id}>.`).catch(() => null);
           }
         }
       }
@@ -2451,6 +2450,19 @@ client.on('interactionCreate', async (interaction) => {
 
   // Botão Anúncio de Repercussão Geral
   if (interaction.isButton() && interaction.customId === 'btn_anunciar_repercussao') {
+    const member = interaction.member;
+    const isCorregedoriaOrJuiz = member && member.roles.cache.some(r => {
+      const name = r.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      return name.includes('corregedoria') || name.includes('juiz');
+    });
+
+    if (!isCorregedoriaOrJuiz) {
+      return interaction.reply({
+        content: '⚠️ **Acesso Negado:** Apenas membros da Corregedoria-Geral e Magistrados podem expedir anúncios de Repercussão Geral.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+
     const modal = new ModalBuilder()
       .setCustomId('modal_anuncio_repercussao')
       .setTitle('Anúncio de Repercussão Geral');
@@ -2511,8 +2523,21 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // Botão Anúncio Secreto
+  // Botão Anúncio Oficial (Corregedoria)
   if (interaction.isButton() && interaction.customId === 'btn_abrir_modal_anuncio') {
+    const member = interaction.member;
+    const isCorregedoriaOrJuiz = member && member.roles.cache.some(r => {
+      const name = r.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      return name.includes('corregedoria') || name.includes('juiz');
+    });
+
+    if (!isCorregedoriaOrJuiz) {
+      return interaction.reply({
+        content: '⚠️ **Acesso Negado:** Apenas membros da Corregedoria-Geral e Magistrados podem expedir anúncios oficiais.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+
     const modal = new ModalBuilder()
       .setCustomId('modal_anuncio')
       .setTitle('Publicar Anúncio Oficial');
@@ -2696,8 +2721,21 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // Botão Mandado de Prisão
+  // Botão Mandado de Prisão (PF / Corregedoria)
   if (interaction.isButton() && interaction.customId === 'btn_solicitar_mandado') {
+    const member = interaction.member;
+    const hasPermission = member && member.roles.cache.some(r => {
+      const name = r.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      return name.includes('juiz') || name.includes('delegad') || name.includes('polici') || name.includes('autoridade') || name.includes('escrivao') || name.includes('diretor') || name.includes('corregedoria') || name.includes('membro de corporacao');
+    });
+
+    if (!hasPermission) {
+      return interaction.reply({
+        content: '⚠️ **Acesso Negado:** Apenas Autoridades Policiais, Delegados, Escrivães e Membros de Corporação podem solicitar mandados.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+
     const modal = new ModalBuilder()
       .setCustomId('modal_solicitar_mandado')
       .setTitle('Solicitação de Mandado de Prisão');
@@ -2901,6 +2939,19 @@ client.on('interactionCreate', async (interaction) => {
 
   // Botão Mandado Interno (Comunicação Interna)
   if (interaction.isButton() && interaction.customId === 'btn_solicitar_mandado_interno') {
+    const member = interaction.member;
+    const hasPermission = member && member.roles.cache.some(r => {
+      const name = r.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      return name.includes('juiz') || name.includes('delegad') || name.includes('polici') || name.includes('autoridade') || name.includes('escrivao') || name.includes('diretor');
+    });
+
+    if (!hasPermission) {
+      return interaction.reply({
+        content: '⚠️ **Acesso Negado:** Apenas Autoridades Policiais, Delegados, Escrivães e Juízes de Direito podem utilizar este painel de comunicação.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+
     const modal = new ModalBuilder()
       .setCustomId('modal_solicitar_mandado_interno')
       .setTitle('Mandado via Comunicação Interna');
