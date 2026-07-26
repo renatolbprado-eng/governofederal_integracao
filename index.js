@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Collection, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ChannelSelectMenuBuilder, MessageFlags, PermissionFlagsBits } from 'discord.js';
+import { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, Collection, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ChannelSelectMenuBuilder, RoleSelectMenuBuilder, MessageFlags, PermissionFlagsBits } from 'discord.js';
 import dotenv from 'dotenv';
 import express from 'express';
 import fs from 'fs';
@@ -32,6 +32,10 @@ let latestWarrant = {
 
 // Lista de todos os mandados de prisão em aberto
 let openWarrants = [];
+
+// Sessões de alteração de permissões pendentes no módulo de moderação
+const pendingRoleSelections = new Map();
+const pendingManualRoleInput = new Map();
 
 // --- CONSTANTES E MAPAS DA CORREGEDORIA & TRIANGULAÇÃO ---
 const ROLE_CORREGEDORIA_NOME = '「CRRGD」・ Corregedoria Geral';
@@ -284,6 +288,37 @@ async function getProcessParties(thread) {
   }
 }
 
+// Auxiliar para obter ou criar a categoria TRIBUNAL DE JUSTIÇA DO PARANÁ
+async function getOrCreateTribunalCategory(guild) {
+  try {
+    const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
+    const channelsArray = safeGetArray(channels);
+
+    // Busca prioritária por Tribunal de Justiça do Paraná (TJPR) excluindo STF / Supremo
+    let category = channelsArray.find(c => c && c.type === ChannelType.GuildCategory && (
+      (c.name.toLowerCase().includes('paraná') ||
+       c.name.toLowerCase().includes('parana') ||
+       c.name.toLowerCase().includes('tjpr') ||
+       c.name.toLowerCase().includes('tribunal de justiça') ||
+       c.name.toLowerCase().includes('tribunal de justica')) &&
+      !c.name.toLowerCase().includes('stf') &&
+      !c.name.toLowerCase().includes('supremo')
+    ));
+
+    if (!category) {
+      category = await guild.channels.create({
+        name: '🏛️ TRIBUNAL DE JUSTIÇA DO PARANÁ',
+        type: ChannelType.GuildCategory
+      }).catch(() => null);
+    }
+
+    return category;
+  } catch (err) {
+    console.error('Erro ao buscar/criar categoria Tribunal de Justiça do Paraná:', err);
+    return null;
+  }
+}
+
 // Inicializa a contagem de processos em cache na inicialização do bot
 async function initializeJuizesWorkload(guild) {
   try {
@@ -292,7 +327,6 @@ async function initializeJuizesWorkload(guild) {
     const juizRole = rolesArray.find(r => r && r.name === 'J. Dir. | Juiz de Direito');
     if (!juizRole) return;
 
-    // Busca ativa dos juízes com fallbacks
     let members = await guild.members.fetch({ force: true }).catch(() => null);
     if (!members) members = juizRole.members;
     if (!members) members = guild.members.cache;
@@ -305,48 +339,58 @@ async function initializeJuizesWorkload(guild) {
       juizWorkloadsCache[member.id] = 0;
     }
 
+    // Localiza especificamente o canal de petições (📜・petições)
     const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
     const channelsArray = safeGetArray(channels);
-    const peticoesChannel = channelsArray.find(c => c && c.name && matchChannel(c.name, 'petições'));
-    const peticionamentoChannel = channelsArray.find(c => c && c.name && matchChannel(c.name, 'peticionamento-eletrônico'));
+    const peticoesChannel = channelsArray.find(c => c && c.name && (
+      matchChannel(c.name, 'petições') ||
+      matchChannel(c.name, 'peticoes')
+    ));
 
-    const allThreads = [];
+    if (!peticoesChannel) {
+      console.log(`[Juízes Relatório] Canal "petições" não encontrado no servidor: ${guild.name}`);
+      return;
+    }
 
-    // Coleta do Fórum
-    if (peticoesChannel && peticoesChannel.type === ChannelType.GuildForum) {
+    // Coleta APENAS as threads ativas pertencentes exclusivamente ao canal 📜・petições
+    let activeThreads = [];
+    if (typeof peticoesChannel.threads?.fetchActive === 'function') {
       const active = await peticoesChannel.threads.fetchActive().catch(() => ({ threads: new Map() }));
-      const archived = await peticoesChannel.threads.fetchArchived({ limit: 50 }).catch(() => ({ threads: new Map() }));
-      allThreads.push(...safeGetArray(active.threads), ...safeGetArray(archived.threads));
+      activeThreads = safeGetArray(active.threads);
+    } else {
+      const allActive = await guild.channels.fetchActiveThreads().catch(() => ({ threads: new Map() }));
+      activeThreads = safeGetArray(allActive.threads).filter(t => t && t.parentId === peticoesChannel.id);
     }
 
-    // Coleta de Segredo
-    if (peticionamentoChannel) {
-      const active = await peticionamentoChannel.threads.fetchActive().catch(() => ({ threads: new Map() }));
-      const archived = await peticionamentoChannel.threads.fetchArchived({ limit: 50 }).catch(() => ({ threads: new Map() }));
-      allThreads.push(...safeGetArray(active.threads), ...safeGetArray(archived.threads));
-    }
+    const processThreads = activeThreads.filter(t => t && (t.name.includes('PROC-') || t.name.includes('SEGREDO')));
 
-    const processThreads = allThreads.filter(t => t.name.includes('PROC-') || t.name.includes('🔒 SEGREDO'));
-
-    // Varre cada thread sequencialmente para contar
+    // Varre cada thread ativa em petições para contabilizar a carga de trabalho do juiz sorteado
     for (const thread of processThreads) {
       try {
-        const msgs = await thread.messages.fetch({ limit: 5 }).catch(() => null);
+        const msgs = await thread.messages.fetch({ limit: 10 }).catch(() => null);
         if (!msgs) continue;
         const msgsArray = safeGetArray(msgs);
-        const distMsg = msgsArray.find(m => m && m.content && m.content.includes('Sorteio de Magistrado:'));
-        if (distMsg) {
-          const match = distMsg.content.match(/Sorteio de Magistrado:.*?<@!?(\d+)>/i);
-          if (match && match[1]) {
-            const juizId = match[1];
-            if (juizId in juizWorkloadsCache) {
-              juizWorkloadsCache[juizId]++;
+        
+        for (const m of msgsArray) {
+          if (m && m.content) {
+            const matches = m.content.match(/<@!?(\d+)>/g);
+            if (matches) {
+              for (const match of matches) {
+                const jId = match.replace(/<@!?/, '').replace('>', '');
+                if (jId in juizWorkloadsCache && (
+                  m.content.includes('Juiz') ||
+                  m.content.includes('Magistrado') ||
+                  m.content.includes('Sorteio') ||
+                  m.content.includes('Autuação')
+                )) {
+                  juizWorkloadsCache[jId]++;
+                  break; // Conta apenas 1 vez por processo
+                }
+              }
             }
           }
         }
-      } catch (err) {
-        // Ignora erros de canais/mensagens indisponíveis
-      }
+      } catch (err) {}
     }
     console.log(`[Juízes Relatório] Cache de carga de trabalho inicializado:`, juizWorkloadsCache);
   } catch (err) {
@@ -394,7 +438,7 @@ async function updateJuizesWorkload(guild) {
       }
     }
 
-    // Formata o relatório
+    // 1. Relatório de Carga de Trabalho
     const timeStamp = getFormattedDateTime();
     let reportContent = `🏛️ **RELATÓRIO DE DISTRIBUIÇÃO E CARGA DE TRABALHO - MAGISTRATURA**\n` +
                         `📅 *Atualizado em: ${timeStamp}*\n\n` +
@@ -445,7 +489,38 @@ async function updateJuizesWorkload(guild) {
       await juizesChannel.send({ content: reportContent, components: rows }).catch(() => null);
     }
 
-    console.log(`[Juízes Relatório] Relatório atualizado no canal #${juizesChannel.name} de ${guild.name}.`);
+    // 2. Painel Fixado de Marcação de Audiências em #juízes
+    const botMsgAudiencias = channelMsgsArray.find(m => m && m.author && m.author.id === client.user.id && m.embeds && m.embeds[0] && m.embeds[0].title && m.embeds[0].title.includes('MARCAÇÃO DE AUDIÊNCIAS'));
+
+    const audienciasEmbed = new EmbedBuilder()
+      .setTitle('⚖️ MARCAÇÃO E AGENDA DE AUDIÊNCIAS JUDICIAIS')
+      .setDescription(
+        `Central de agendamento de sessões de conciliação e audiências de instrução e julgamento do Tribunal.\n\n` +
+        `📌 **COMO AGENDAR UMA AUDIÊNCIA:**\n` +
+        `1. Clique no botão **"📅 Agendar Audiência"** abaixo.\n` +
+        `2. Preencha o **Número do Processo**, informe se é **Conciliação** ou **Instrução e Julgamento** e a **Data/Horário**.\n` +
+        `3. O bot criará um **Card da Audiência** e a **Sala de Áudio Oficial** na seção do *Tribunal de Justiça*.\n` +
+        `4. Para encerrar a sessão, utilize o botão **"🗑️ Excluir Audiência"** no card da audiência criada.`
+      )
+      .setColor(0xd4af37)
+      .setFooter({ text: 'Poder Judiciário • Gestão de Pauta de Audiências' })
+      .setTimestamp();
+
+    const btnMarcarAud = new ButtonBuilder()
+      .setCustomId('btn_marcar_audiencia')
+      .setLabel('📅 Agendar Audiência')
+      .setStyle(ButtonStyle.Primary);
+
+    const rowAudienciaMsg = new ActionRowBuilder().addComponents(btnMarcarAud);
+
+    if (!botMsgAudiencias) {
+      const sentAud = await juizesChannel.send({ embeds: [audienciasEmbed], components: [rowAudienciaMsg] }).catch(() => null);
+      if (sentAud) await sentAud.pin().catch(() => null);
+    } else {
+      await botMsgAudiencias.edit({ embeds: [audienciasEmbed], components: [rowAudienciaMsg] }).catch(() => null);
+    }
+
+    console.log(`[Juízes Relatório] Relatório e Painel de Audiências atualizados em #${juizesChannel.name} (${guild.name}).`);
   } catch (err) {
     console.error('Erro ao atualizar carga de trabalho dos juízes:', err);
   }
@@ -858,12 +933,79 @@ client.once('ready', async () => {
         logs.push(`  ├─ ❌ [Manual de Uso] Falha na inicialização: ${e.message}`);
       }
 
+// MÓDULO DE GESTÃO INSTITUCIONAL DE PERMISSÕES & ACESSOS (#moderator-only)
+async function initializeGestaoPermissoes(guild) {
+  try {
+    const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
+    const channelsArray = safeGetArray(channels);
+    const modChannel = channelsArray.find(c => c && c.isTextBased() && (
+      matchChannel(c.name, 'moderator-only') ||
+      matchChannel(c.name, 'moderador') ||
+      matchChannel(c.name, 'mod-only') ||
+      matchChannel(c.name, 'gestao-permissoes') ||
+      matchChannel(c.name, 'permissoes')
+    ));
+
+    if (!modChannel) return;
+
+    // Busca histórico recente para não duplicar o painel
+    const msgs = await modChannel.messages.fetch({ limit: 20 }).catch(() => null);
+    const msgsArray = safeGetArray(msgs);
+    let setupMessage = msgsArray.find(m => m && m.author.id === client.user.id && m.embeds.length > 0 && m.embeds[0].title && m.embeds[0].title.includes('GESTÃO DE PERMISSÕES'));
+
+    const panelEmbed = new EmbedBuilder()
+      .setTitle('🛡️ PAINEL INSTITUCIONAL DE GESTÃO DE PERMISSÕES & ACESSOS')
+      .setDescription(
+        `Bem-vindo à Central de Controle e Auditoria de Acessos dos Canais do Servidor.\n\n` +
+        `📌 **COMO UTILIZAR ESTE PAINEL:**\n` +
+        `1. **Selecione o Canal ou Bloco (Categoria):** Escolha qualquer canal de texto, voz, fórum ou categoria no menu suspenso abaixo.\n` +
+        `2. **Inspecione os Acessos Existentes:** O bot exibirá um relatório com todos os cargos que possuem permissões customizadas naquele local.\n` +
+        `3. **Modifique Permissões por Quesito:** Escolha um cargo para conceder (🟢), negar (🔴) ou restaurar para o padrão (⚪) permissões de **Visualização**, **Envio de Mensagens**, **Anexo de Arquivos** ou **Gerenciamento**.`
+      )
+      .setColor(0x34495e)
+      .setFooter({ text: 'Sistema de Moderação e Controle Institucional • Acesso Restrito' })
+      .setTimestamp();
+
+    const channelSelect = new ChannelSelectMenuBuilder()
+      .setCustomId('select_canal_gestao')
+      .setPlaceholder('🔍 Selecione um canal de texto ou bloco de canais (categoria)...');
+
+    const row = new ActionRowBuilder().addComponents(channelSelect);
+
+    if (!setupMessage) {
+      const sentMsg = await modChannel.send({ embeds: [panelEmbed], components: [row] }).catch(() => null);
+      if (sentMsg) {
+        await sentMsg.pin().catch(() => null);
+        setTimeout(async () => {
+          try {
+            const sysMsgs = await modChannel.messages.fetch({ limit: 10 });
+            const pinMsg = safeGetArray(sysMsgs).find(m => m && m.type === 6 && m.reference && m.reference.messageId === sentMsg.id);
+            if (pinMsg) await pinMsg.delete().catch(() => null);
+          } catch (e) {}
+        }, 2000);
+      }
+    } else {
+      await setupMessage.edit({ embeds: [panelEmbed], components: [row] }).catch(() => null);
+    }
+  } catch (err) {
+    console.error('[Gestão Permissões] Erro ao inicializar painel de gestão:', err);
+  }
+}
+
       // 5. Módulo Arquivo de Processos (Restrição para Juízes)
       try {
         await ensureArchiveChannelPermissions(guild);
-        logs.push(`  └─ 📁 [Arquivo-Processos] Permissões restringidas exclusivamente a Juízes de Direito.`);
+        logs.push(`  ├─ 📁 [Arquivo-Processos] Permissões restringidas exclusivamente a Juízes de Direito.`);
       } catch (e) {
-        logs.push(`  └─ ❌ [Arquivo-Processos] Falha na restrição de permissões: ${e.message}`);
+        logs.push(`  ├─ ❌ [Arquivo-Processos] Falha na restrição de permissões: ${e.message}`);
+      }
+
+      // 6. Módulo Gestão de Permissões (#moderator-only)
+      try {
+        await initializeGestaoPermissoes(guild);
+        logs.push(`  └─ 🛡️ [Gestão-Permissões] Painel de Controle de Acessos verificado/atualizado.`);
+      } catch (e) {
+        logs.push(`  └─ ❌ [Gestão-Permissões] Falha na inicialização: ${e.message}`);
       }
 
       // Imprime logs agrupados de canais
@@ -1260,6 +1402,116 @@ client.on('messageCreate', async (message) => {
   }
 
   const content = message.content.trim();
+
+  // --- CAPTURA DE ENTRADA MANUAL DE CARGOS PARA GESTÃO DE PERMISSÕES ---
+  const pendingRoleInput = pendingManualRoleInput.get(message.author.id);
+  if (pendingRoleInput) {
+    pendingManualRoleInput.delete(message.author.id);
+
+    // Deleta imediatamente a mensagem digitada pelo usuário no chat para manter o canal limpo
+    await message.delete().catch(() => null);
+
+    let foundRoles = [];
+    if (message.mentions && message.mentions.roles.size > 0) {
+      foundRoles = Array.from(message.mentions.roles.values());
+    } else {
+      const text = message.content.toLowerCase();
+      const allRoles = await message.guild.roles.fetch().catch(() => message.guild.roles.cache);
+      const rolesArr = safeGetArray(allRoles);
+      foundRoles = rolesArr.filter(r => r && (text.includes(r.name.toLowerCase()) || text.includes(r.id)));
+    }
+
+    if (foundRoles.length === 0) {
+      const promptError = await message.channel.send({
+        content: `⚠️ <@${message.author.id}> **Nenhum cargo válido foi encontrado na sua mensagem.**\nPor favor, tente novamente clicando em **➕ Adicionar Permissões** e mencionando os cargos *(ex: @Cargo1 @Cargo2)*.`,
+        allowedMentions: { parse: [] }
+      }).catch(() => null);
+      if (promptError) setTimeout(() => promptError.delete().catch(() => {}), 8000);
+      return;
+    }
+
+    const roleIds = foundRoles.map(r => r.id);
+    const { channelId, direito } = pendingRoleInput;
+    pendingRoleSelections.set(message.author.id, { channelId, direito, roleIds });
+
+    const targetChannel = await message.guild.channels.fetch(channelId).catch(() => null);
+    const quesitoLabel = direito === 'view' ? 'Visualizar Canal' : (direito === 'send' ? 'Enviar Mensagens' : (direito === 'files' ? 'Anexar Arquivos/Mídia' : 'Gerenciar Canal'));
+    const roleNamesText = foundRoles.map(r => `\`@${r.name}\``).join(', ');
+
+    const embedApply = new EmbedBuilder()
+      .setTitle(`⚖️ DEFINIR PERMISSÃO: ${quesitoLabel.toUpperCase()}`)
+      .setDescription(
+        `Você identificou **${foundRoles.length} cargo(s)** para o recurso **${targetChannel ? targetChannel.name : channelId}**:\n\n` +
+        `• **Cargos identificados:** ${roleNamesText}\n` +
+        `• **Quesito:** \`${quesitoLabel}\`\n\n` +
+        `Escolha a ação a ser aplicada aos cargos:`
+      )
+      .setColor(0xe67e22)
+      .setTimestamp();
+
+    const btnAllow = new ButtonBuilder().setCustomId('btn_apply_multi_allow').setLabel('🟢 Conceder (Permitir)').setStyle(ButtonStyle.Success);
+    const btnDeny = new ButtonBuilder().setCustomId('btn_apply_multi_deny').setLabel('🔴 Restringir (Negar)').setStyle(ButtonStyle.Danger);
+    const btnCancel = new ButtonBuilder().setCustomId('btn_cancelar_gestao').setLabel('❌ Cancelar').setStyle(ButtonStyle.Secondary);
+
+    const rowAction = new ActionRowBuilder().addComponents(btnAllow, btnDeny, btnCancel);
+
+    const promptReply = await message.channel.send({
+      content: `<@${message.author.id}>`,
+      embeds: [embedApply],
+      components: [rowAction],
+      allowedMentions: { parse: [] }
+    }).catch(() => null);
+
+    if (promptReply) {
+      setTimeout(() => promptReply.delete().catch(() => {}), 90000);
+    }
+    return;
+  }
+
+  // COMANDO !SETUP-PERMISSOES / !SETUP-MODERADOR
+  if (content.toLowerCase() === '!setup-permissoes' || content.toLowerCase() === '!setup-moderador') {
+    const member = message.member;
+    const isAuthorized = member && (
+      member.permissions.has(PermissionFlagsBits.Administrator) ||
+      member.permissions.has(PermissionFlagsBits.ManageChannels) ||
+      member.roles.cache.some(r => {
+        const name = r.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        return name.includes('moderad') || name.includes('administrad') || name.includes('juiz') || name.includes('corregedoria') || name.includes('staff');
+      })
+    );
+
+    if (!isAuthorized) {
+      await message.reply('⚠️ **Acesso Negado:** Apenas Administradores e Moderadores autorizados podem criar o painel de gestão de permissões.').catch(() => null);
+      return;
+    }
+
+    message.delete().catch(() => null);
+
+    const panelEmbed = new EmbedBuilder()
+      .setTitle('🛡️ PAINEL INSTITUCIONAL DE GESTÃO DE PERMISSÕES & ACESSOS')
+      .setDescription(
+        `Bem-vindo à Central de Controle e Auditoria de Acessos dos Canais do Servidor.\n\n` +
+        `📌 **COMO UTILIZAR ESTE PAINEL:**\n` +
+        `1. **Selecione o Canal ou Bloco (Categoria):** Escolha qualquer canal de texto, voz, fórum ou categoria no menu suspenso abaixo.\n` +
+        `2. **Inspecione os Acessos Existentes:** O bot exibirá um relatório com todos os cargos que possuem permissões customizadas naquele local.\n` +
+        `3. **Modifique Permissões por Quesito:** Escolha um cargo para conceder (🟢), negar (🔴) ou restaurar para o padrão (⚪) permissões de **Visualização**, **Envio de Mensagens**, **Anexo de Arquivos** ou **Gerenciamento**.`
+      )
+      .setColor(0x34495e)
+      .setFooter({ text: 'Sistema de Moderação e Controle Institucional • Acesso Restrito' })
+      .setTimestamp();
+
+    const channelSelect = new ChannelSelectMenuBuilder()
+      .setCustomId('select_canal_gestao')
+      .setPlaceholder('🔍 Selecione um canal de texto ou bloco de canais (categoria)...');
+
+    const row = new ActionRowBuilder().addComponents(channelSelect);
+
+    const sentMsg = await message.channel.send({ embeds: [panelEmbed], components: [row] }).catch(() => null);
+    if (sentMsg) {
+      await sentMsg.pin().catch(() => null);
+    }
+    return;
+  }
 
   // COMANDO !GLOBO (Envio de mensagem formatada para Tupper no canal 💬・chat)
   if (content.toLowerCase().startsWith('!globo')) {
@@ -2437,6 +2689,414 @@ async function runPetitionWizard(thread, authorId, modalData) {
 
 // LISTENER PARA O BOTÃO DE PETICIONAMENTO E EVENTOS DE INTERAÇÃO
 client.on('interactionCreate', async (interaction) => {
+  // --- MÓDULO DE GESTÃO DE PERMISSÕES (#moderator-only) ---
+
+  // Botão Cancelar Universal da Gestão de Permissões
+  if (interaction.isButton() && interaction.customId === 'btn_cancelar_gestao') {
+    pendingRoleSelections.delete(interaction.user.id);
+    pendingManualRoleInput.delete(interaction.user.id);
+
+    if (interaction.message && interaction.message.deletable && !interaction.message.embeds[0]?.title?.includes('PAINEL INSTITUCIONAL DE GESTÃO')) {
+      await interaction.message.delete().catch(() => {});
+    }
+
+    await interaction.reply({ content: '❌ **Operação cancelada.**', ephemeral: true }).catch(() => null);
+    return;
+  }
+
+  // 1. Seleção de Canal/Categoria
+  if (interaction.isChannelSelectMenu() && interaction.customId === 'select_canal_gestao') {
+    const member = interaction.member;
+    const isAuthorized = member && (
+      member.permissions.has(PermissionFlagsBits.Administrator) ||
+      member.permissions.has(PermissionFlagsBits.ManageChannels) ||
+      member.roles.cache.some(r => {
+        const name = r.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        return name.includes('moderad') || name.includes('administrad') || name.includes('juiz') || name.includes('corregedoria') || name.includes('staff');
+      })
+    );
+
+    if (!isAuthorized) {
+      return interaction.reply({
+        content: '⚠️ **Acesso Negado:** Apenas Administradores e Moderadores autorizados podem gerenciar permissões de canais.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+
+    const channelId = interaction.values[0];
+    const targetChannel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+
+    if (!targetChannel) {
+      return interaction.reply({ content: '❌ Erro: Canal ou categoria não encontrada no servidor.', ephemeral: true }).catch(() => null);
+    }
+
+    let overwritesText = '';
+    const overwrites = targetChannel.permissionOverwrites.cache;
+
+    if (overwrites.size === 0) {
+      overwritesText = '*Nenhuma permissão customizada configurada neste canal (herdando padrões globais do servidor).*';
+    } else {
+      for (const [id, overwrite] of overwrites) {
+        let targetName = id;
+        if (id === interaction.guild.roles.everyone.id) {
+          targetName = '🌐 @everyone';
+        } else {
+          const role = interaction.guild.roles.cache.get(id);
+          if (role) targetName = `👥 @${role.name}`;
+          else {
+            const m = await interaction.guild.members.fetch(id).catch(() => null);
+            if (m) targetName = `👤 ${m.user.username}`;
+          }
+        }
+
+        const view = overwrite.allow.has(PermissionFlagsBits.ViewChannel) ? '🟢 Permitido' : (overwrite.deny.has(PermissionFlagsBits.ViewChannel) ? '🔴 Negado' : '⚪ Padrão');
+        const send = overwrite.allow.has(PermissionFlagsBits.SendMessages) ? '🟢 Permitido' : (overwrite.deny.has(PermissionFlagsBits.SendMessages) ? '🔴 Negado' : '⚪ Padrão');
+        const files = overwrite.allow.has(PermissionFlagsBits.AttachFiles) ? '🟢 Permitido' : (overwrite.deny.has(PermissionFlagsBits.AttachFiles) ? '🔴 Negado' : '⚪ Padrão');
+        const manage = (overwrite.allow.has(PermissionFlagsBits.ManageChannels) || overwrite.allow.has(PermissionFlagsBits.ManageMessages)) ? '🟢 Permitido' : ((overwrite.deny.has(PermissionFlagsBits.ManageChannels) || overwrite.deny.has(PermissionFlagsBits.ManageMessages)) ? '🔴 Negado' : '⚪ Padrão');
+
+        overwritesText += `**${targetName}**:\n` +
+                          `• 👁️ Ver Canal: ${view}\n` +
+                          `• 💬 Enviar Mensagens: ${send}\n` +
+                          `• 📎 Anexar Arquivos: ${files}\n` +
+                          `• 🛠️ Gerenciar: ${manage}\n\n`;
+      }
+    }
+
+    const isCategory = targetChannel.type === ChannelType.GuildCategory;
+    const typeLabel = isCategory ? '📁 Bloco de Canais (Categoria)' : '📜 Canal de Texto/Mídia';
+
+    const detailEmbed = new EmbedBuilder()
+      .setTitle(`🛡️ INSPEÇÃO DE ACESSO: ${targetChannel.name}`)
+      .setColor(0x2c3e50)
+      .addFields(
+        { name: '📂 Tipo do Recurso', value: typeLabel, inline: true },
+        { name: '🆔 ID', value: `\`${targetChannel.id}\``, inline: true },
+        { name: '📋 Permissões Mapeadas por Cargo', value: overwritesText.substring(0, 1024) }
+      )
+      .setFooter({ text: 'Selecione um cargo abaixo para rápida edição ou clique em Adicionar Permissões.' })
+      .setTimestamp();
+
+    const roleSelect = new RoleSelectMenuBuilder()
+      .setCustomId(`select_role_gestao_${targetChannel.id}`)
+      .setPlaceholder('👥 Edição rápida: Selecione um cargo individual...');
+
+    const rowRole = new ActionRowBuilder().addComponents(roleSelect);
+
+    const btnAddPerm = new ButtonBuilder()
+      .setCustomId(`btn_add_perm_${targetChannel.id}`)
+      .setLabel('➕ Adicionar Permissões')
+      .setStyle(ButtonStyle.Primary);
+
+    const btnCancel = new ButtonBuilder()
+      .setCustomId('btn_cancelar_gestao')
+      .setLabel('❌ Cancelar')
+      .setStyle(ButtonStyle.Secondary);
+
+    const rowButtons = new ActionRowBuilder().addComponents(btnAddPerm, btnCancel);
+
+    await interaction.reply({
+      embeds: [detailEmbed],
+      components: [rowRole, rowButtons],
+      allowedMentions: { parse: [] },
+      ephemeral: true
+    }).catch(() => null);
+    return;
+  }
+
+  // 2. Botão ➕ Adicionar Permissões -> Escolhe o Direito / Quesito
+  if (interaction.isButton() && interaction.customId.startsWith('btn_add_perm_')) {
+    const channelId = interaction.customId.replace('btn_add_perm_', '');
+    const targetChannel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+
+    if (!targetChannel) {
+      return interaction.reply({ content: '❌ Canal não encontrado.', ephemeral: true }).catch(() => null);
+    }
+
+    const embedRight = new EmbedBuilder()
+      .setTitle(`➕ ADICIONAR PERMISSÕES: ${targetChannel.name}`)
+      .setDescription(
+        `Selecione no menu abaixo **qual o direito / quesito de permissão** você deseja definir neste recurso:\n\n` +
+        `• 👁️ **Visualizar Canal** (*ViewChannel & ReadHistory*)\n` +
+        `• 💬 **Enviar Mensagens** (*SendMessages & InThreads*)\n` +
+        `• 📎 **Anexar Arquivos / Mídia** (*AttachFiles & EmbedLinks*)\n` +
+        `• 🛠️ **Gerenciar Canal** (*ManageChannels & Messages*)`
+      )
+      .setColor(0x2980b9)
+      .setTimestamp();
+
+    const selectDireito = new StringSelectMenuBuilder()
+      .setCustomId(`select_direito_gestao_${channelId}`)
+      .setPlaceholder('🔍 Selecione o direito/quesito de permissão...')
+      .addOptions(
+        new StringSelectMenuOptionBuilder().setLabel('👁️ Visualizar Canal').setValue('view').setDescription('Permissão para ver o canal e ler histórico de mensagens'),
+        new StringSelectMenuOptionBuilder().setLabel('💬 Enviar Mensagens').setValue('send').setDescription('Permissão para digitar e enviar mensagens/respostas'),
+        new StringSelectMenuOptionBuilder().setLabel('📎 Anexar Arquivos / Mídia').setValue('files').setDescription('Permissão para enviar anexos, imagens e links'),
+        new StringSelectMenuOptionBuilder().setLabel('🛠️ Gerenciar Canal').setValue('manage').setDescription('Permissão para gerenciar e editar o recurso')
+      );
+
+    const rowDireito = new ActionRowBuilder().addComponents(selectDireito);
+    const btnCancel = new ButtonBuilder().setCustomId('btn_cancelar_gestao').setLabel('❌ Cancelar').setStyle(ButtonStyle.Secondary);
+    const rowCancel = new ActionRowBuilder().addComponents(btnCancel);
+
+    await interaction.reply({
+      embeds: [embedRight],
+      components: [rowDireito, rowCancel],
+      allowedMentions: { parse: [] },
+      ephemeral: true
+    }).catch(() => null);
+    return;
+  }
+
+  // 3. Seleção do Direito -> Instrução para Digitar/Mencionar Cargos no Chat
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_direito_gestao_')) {
+    const channelId = interaction.customId.replace('select_direito_gestao_', '');
+    const direito = interaction.values[0];
+    const targetChannel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+
+    if (!targetChannel) {
+      return interaction.reply({ content: '❌ Canal não encontrado.', ephemeral: true }).catch(() => null);
+    }
+
+    // Registra a sessão para aguardar os cargos digitados no chat
+    pendingManualRoleInput.set(interaction.user.id, { channelId, direito });
+
+    const quesitoLabel = direito === 'view' ? 'Visualizar Canal' : (direito === 'send' ? 'Enviar Mensagens' : (direito === 'files' ? 'Anexar Arquivos/Mídia' : 'Gerenciar Canal'));
+
+    const embedPrompt = new EmbedBuilder()
+      .setTitle(`📝 MARCAR CARGOS NO CHAT: ${quesitoLabel.toUpperCase()}`)
+      .setDescription(
+        `Você selecionou o direito **${quesitoLabel}** para o recurso **${targetChannel.name}**.\n\n` +
+        `👉 **MENCIONE OU DIGITE OS CARGOS AGORA NO CHAT:**\n` +
+        `Envie uma mensagem aqui no chat mencionando os cargos \`(ex: @Juiz de Direito @Delegado)\` ou digitando o nome deles.\n\n` +
+        `*(Sua mensagem enviada no chat será apagada automaticamente pelo bot para manter o canal limpo e sem notificações).*`
+      )
+      .setColor(0xf1c40f)
+      .setTimestamp();
+
+    const btnCancel = new ButtonBuilder().setCustomId('btn_cancelar_gestao').setLabel('❌ Cancelar').setStyle(ButtonStyle.Secondary);
+    const rowCancel = new ActionRowBuilder().addComponents(btnCancel);
+
+    await interaction.reply({
+      embeds: [embedPrompt],
+      components: [rowCancel],
+      allowedMentions: { parse: [] },
+      ephemeral: true
+    }).catch(() => null);
+    return;
+  }
+
+  // 4. Seleção Múltipla de Cargos Concluída -> Mostra Botões Conceder / Restringir / Cancelar
+  if (interaction.isRoleSelectMenu() && interaction.customId.startsWith('select_roles_multi_')) {
+    const parts = interaction.customId.split('_'); // ['select', 'roles', 'multi', channelId, direito]
+    const channelId = parts[3];
+    const direito = parts[4];
+    const roleIds = interaction.values;
+
+    const targetChannel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+    if (!targetChannel) {
+      return interaction.reply({ content: '❌ Canal não encontrado.', ephemeral: true }).catch(() => null);
+    }
+
+    // Salva a sessão pendente do usuário
+    pendingRoleSelections.set(interaction.user.id, { channelId, direito, roleIds });
+
+    const quesitoLabel = direito === 'view' ? 'Visualizar Canal' : (direito === 'send' ? 'Enviar Mensagens' : (direito === 'files' ? 'Anexar Arquivos/Mídia' : 'Gerenciar Canal'));
+    const roleNamesText = roleIds.map(id => {
+      const r = interaction.guild.roles.cache.get(id);
+      return r ? `\`@${r.name}\`` : `\`${id}\``;
+    }).join(', ');
+
+    const embedApply = new EmbedBuilder()
+      .setTitle(`⚖️ DEFINIR PERMISSÃO: ${quesitoLabel.toUpperCase()}`)
+      .setDescription(
+        `Você selecionou **${roleIds.length} cargo(s)** para o recurso **${targetChannel.name}**:\n` +
+        `• **Cargos selecionados:** ${roleNamesText}\n` +
+        `• **Quesito:** \`${quesitoLabel}\`\n\n` +
+        `Escolha a ação a ser aplicada aos cargos selecionados:`
+      )
+      .setColor(0xe67e22)
+      .setTimestamp();
+
+    const btnAllow = new ButtonBuilder().setCustomId('btn_apply_multi_allow').setLabel('🟢 Conceder (Permitir)').setStyle(ButtonStyle.Success);
+    const btnDeny = new ButtonBuilder().setCustomId('btn_apply_multi_deny').setLabel('🔴 Restringir (Negar)').setStyle(ButtonStyle.Danger);
+    const btnCancel = new ButtonBuilder().setCustomId('btn_cancelar_gestao').setLabel('❌ Cancelar').setStyle(ButtonStyle.Secondary);
+
+    const rowAction = new ActionRowBuilder().addComponents(btnAllow, btnDeny, btnCancel);
+
+    await interaction.reply({
+      embeds: [embedApply],
+      components: [rowAction],
+      allowedMentions: { parse: [] },
+      ephemeral: true
+    }).catch(() => null);
+    return;
+  }
+
+  // 5. Botão Aplicar Conceder / Restringir Múltiplos Cargos
+  if (interaction.isButton() && (interaction.customId === 'btn_apply_multi_allow' || interaction.customId === 'btn_apply_multi_deny')) {
+    const pending = pendingRoleSelections.get(interaction.user.id);
+    if (!pending) {
+      return interaction.reply({ content: '⚠️ Sessão de alteração expirada. Por favor, refaça a seleção.', ephemeral: true }).catch(() => null);
+    }
+
+    const { channelId, direito, roleIds } = pending;
+    pendingRoleSelections.delete(interaction.user.id);
+
+    const targetChannel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+    if (!targetChannel) {
+      return interaction.reply({ content: '❌ Canal não encontrado.', ephemeral: true }).catch(() => null);
+    }
+
+    const isAllow = interaction.customId === 'btn_apply_multi_allow';
+    const patch = {};
+
+    if (direito === 'view') {
+      patch.ViewChannel = isAllow;
+      patch.ReadMessageHistory = isAllow;
+    } else if (direito === 'send') {
+      patch.SendMessages = isAllow;
+      patch.SendMessagesInThreads = isAllow;
+    } else if (direito === 'files') {
+      patch.AttachFiles = isAllow;
+      patch.EmbedLinks = isAllow;
+    } else if (direito === 'manage') {
+      patch.ManageChannels = isAllow;
+      patch.ManageMessages = isAllow;
+    }
+
+    for (const rId of roleIds) {
+      await targetChannel.permissionOverwrites.edit(rId, patch).catch(() => null);
+    }
+
+    const actionLabel = isAllow ? '🟢 CONCEDIDO (PERMITIDO)' : '🔴 RESTRINGIDO (NEGADO)';
+    const quesitoLabel = direito === 'view' ? 'Visualizar Canal' : (direito === 'send' ? 'Enviar Mensagens' : (direito === 'files' ? 'Anexar Arquivos/Mídia' : 'Gerenciar Canal'));
+    const roleNamesText = roleIds.map(id => {
+      const r = interaction.guild.roles.cache.get(id);
+      return r ? `\`@${r.name}\`` : `\`${id}\``;
+    }).join(', ');
+
+    if (interaction.message && interaction.message.deletable && !interaction.message.embeds[0]?.title?.includes('PAINEL INSTITUCIONAL DE GESTÃO')) {
+      await interaction.message.delete().catch(() => {});
+    }
+
+    await interaction.reply({
+      content: `✅ **Permissões aplicadas com sucesso!**\n\n` +
+               `• **Recurso:** \`${targetChannel.name}\`\n` +
+               `• **Quesito/Direito:** \`${quesitoLabel}\` ➡️ **${actionLabel}**\n` +
+               `• **Cargos Afetados (${roleIds.length}):** ${roleNamesText}`,
+      allowedMentions: { parse: [] },
+      ephemeral: true
+    }).catch(() => null);
+    return;
+  }
+
+  // 6. Seleção Individual de Cargo para Edição Rápida
+  if (interaction.isRoleSelectMenu() && interaction.customId.startsWith('select_role_gestao_')) {
+    const channelId = interaction.customId.replace('select_role_gestao_', '');
+    const roleId = interaction.values[0];
+
+    const targetChannel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+    const role = interaction.guild.roles.cache.get(roleId);
+
+    if (!targetChannel || !role) {
+      return interaction.reply({ content: '❌ Erro: Canal ou Cargo não encontrado.', ephemeral: true }).catch(() => null);
+    }
+
+    const overwrite = targetChannel.permissionOverwrites.cache.get(roleId);
+
+    const viewStatus = overwrite && overwrite.allow.has(PermissionFlagsBits.ViewChannel) ? '🟢 Permitido' : (overwrite && overwrite.deny.has(PermissionFlagsBits.ViewChannel) ? '🔴 Negado' : '⚪ Padrão');
+    const sendStatus = overwrite && overwrite.allow.has(PermissionFlagsBits.SendMessages) ? '🟢 Permitido' : (overwrite && overwrite.deny.has(PermissionFlagsBits.SendMessages) ? '🔴 Negado' : '⚪ Padrão');
+    const filesStatus = overwrite && overwrite.allow.has(PermissionFlagsBits.AttachFiles) ? '🟢 Permitido' : (overwrite && overwrite.deny.has(PermissionFlagsBits.AttachFiles) ? '🔴 Negado' : '⚪ Padrão');
+
+    const roleEmbed = new EmbedBuilder()
+      .setTitle(`⚙️ GERENCIAR PERMISSÕES POR QUESITO: @${role.name}`)
+      .setDescription(
+        `Defina as permissões específicas para o cargo **@${role.name}** no recurso **${targetChannel.name}**:\n\n` +
+        `• 👁️ **Visualizar Canal:** ${viewStatus}\n` +
+        `• 💬 **Enviar Mensagens:** ${sendStatus}\n` +
+        `• 📎 **Anexar Arquivos / Mídia:** ${filesStatus}`
+      )
+      .setColor(0xf39c12)
+      .setTimestamp();
+
+    const rowView = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`btn_perm_allow_view_${channelId}_${roleId}`).setLabel('👁️ Ver: Permitir').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`btn_perm_deny_view_${channelId}_${roleId}`).setLabel('👁️ Ver: Negar').setStyle(ButtonStyle.Danger)
+    );
+
+    const rowSend = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`btn_perm_allow_send_${channelId}_${roleId}`).setLabel('💬 Mensagem: Permitir').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`btn_perm_deny_send_${channelId}_${roleId}`).setLabel('💬 Mensagem: Negar').setStyle(ButtonStyle.Danger)
+    );
+
+    const rowFiles = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`btn_perm_allow_files_${channelId}_${roleId}`).setLabel('📎 Anexo: Permitir').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`btn_perm_deny_files_${channelId}_${roleId}`).setLabel('📎 Anexo: Negar').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`btn_perm_reset_${channelId}_${roleId}`).setLabel('🔄 Resetar Padrão').setStyle(ButtonStyle.Secondary)
+    );
+
+    await interaction.reply({
+      embeds: [roleEmbed],
+      components: [rowView, rowSend, rowFiles],
+      allowedMentions: { parse: [] },
+      ephemeral: true
+    }).catch(() => null);
+    return;
+  }
+
+  // 7. Botões de Alteração de Permissões por Quesito Individual
+  if (interaction.isButton() && interaction.customId.startsWith('btn_perm_')) {
+    const parts = interaction.customId.split('_');
+    const action = parts[2];
+    const quesito = parts[3];
+    const channelId = parts[4];
+    const roleId = parts[5];
+
+    const targetChannel = await interaction.guild.channels.fetch(channelId).catch(() => null);
+    const role = interaction.guild.roles.cache.get(roleId);
+
+    if (!targetChannel || !role) {
+      return interaction.reply({ content: '❌ Erro ao localizar o canal ou cargo.', ephemeral: true }).catch(() => null);
+    }
+
+    try {
+      if (action === 'reset') {
+        await targetChannel.permissionOverwrites.delete(roleId).catch(() => null);
+      } else {
+        const isAllow = action === 'allow';
+        const patch = {};
+
+        if (quesito === 'view') {
+          patch.ViewChannel = isAllow;
+          patch.ReadMessageHistory = isAllow;
+        } else if (quesito === 'send') {
+          patch.SendMessages = isAllow;
+          patch.SendMessagesInThreads = isAllow;
+        } else if (quesito === 'files') {
+          patch.AttachFiles = isAllow;
+          patch.EmbedLinks = isAllow;
+        }
+
+        await targetChannel.permissionOverwrites.edit(roleId, patch);
+      }
+
+      const quesitoLabel = quesito === 'view' ? 'Visualizar Canal' : (quesito === 'send' ? 'Enviar Mensagens' : 'Anexar Arquivos/Mídia');
+      const actionLabel = action === 'allow' ? '🟢 PERMITIDO' : (action === 'deny' ? '🔴 NEGADO' : '⚪ PADRÃO (RESET)');
+
+      await interaction.reply({
+        content: `✅ **Permissão atualizada com sucesso!**\n\n` +
+                 `• **Canal / Bloco:** \`${targetChannel.name}\`\n` +
+                 `• **Cargo:** **@${role.name}**\n` +
+                 `• **Quesito:** \`${quesitoLabel}\` ➡️ **${actionLabel}**`,
+        allowedMentions: { parse: [] },
+        ephemeral: true
+      }).catch(() => null);
+    } catch (err) {
+      console.error('Erro ao aplicar alteração de permissão:', err);
+      await interaction.reply({ content: '❌ Ocorreu um erro ao modificar as permissões no Discord.', ephemeral: true }).catch(() => null);
+    }
+    return;
+  }
   // Seleção de Canais para o Anúncio (Channel Select Menu)
   if (interaction.isChannelSelectMenu() && interaction.customId === 'select_canais_anuncio') {
     userSelectedChannels.set(interaction.user.id, interaction.values);
@@ -3351,6 +4011,140 @@ client.on('interactionCreate', async (interaction) => {
       }
       return;
     }
+  }
+
+  // --- MÓDULO DE AGENDA E MARCAÇÃO DE AUDIÊNCIAS JUDICIAIS (#juízes) ---
+
+  // 1. Botão Agendar Audiência
+  if (interaction.isButton() && interaction.customId === 'btn_marcar_audiencia') {
+    const member = interaction.member;
+    const isJuiz = member && (
+      member.permissions.has(PermissionFlagsBits.Administrator) ||
+      member.roles.cache.some(r => r.name === 'J. Dir. | Juiz de Direito' || r.name.toLowerCase().includes('juiz'))
+    );
+
+    if (!isJuiz) {
+      return interaction.reply({
+        content: '⚠️ **Acesso Negado:** Apenas Juízes de Direito podem agendar audiências judiciais.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId('modal_marcar_audiencia')
+      .setTitle('Agendamento de Audiência Judicial');
+
+    const inputProcesso = new TextInputBuilder()
+      .setCustomId('input_processo_audiencia')
+      .setLabel('Número do Processo')
+      .setPlaceholder('Ex: PROC-2026-X8A9')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const inputTipo = new TextInputBuilder()
+      .setCustomId('input_tipo_audiencia')
+      .setLabel('Tipo (Conciliação / Instrução e Julgamento)')
+      .setPlaceholder('Digite: Conciliação ou Instrução e Julgamento')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const inputData = new TextInputBuilder()
+      .setCustomId('input_data_audiencia')
+      .setLabel('Data e Horário da Audiência')
+      .setPlaceholder('Ex: 28/07/2026 às 15:00')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(inputProcesso),
+      new ActionRowBuilder().addComponents(inputTipo),
+      new ActionRowBuilder().addComponents(inputData)
+    );
+
+    await interaction.showModal(modal).catch(() => null);
+    return;
+  }
+
+  // 2. Submissão do Modal de Agendamento
+  if (interaction.isModalSubmit() && interaction.customId === 'modal_marcar_audiencia') {
+    const numProcesso = interaction.fields.getTextInputValue('input_processo_audiencia').trim();
+    const tipoRaw = interaction.fields.getTextInputValue('input_tipo_audiencia').trim();
+    const dataAudiencia = interaction.fields.getTextInputValue('input_data_audiencia').trim();
+
+    const guild = interaction.guild;
+    const category = await getOrCreateTribunalCategory(guild);
+
+    const cleanTipo = tipoRaw.toLowerCase().includes('concili') ? 'Conciliação' : 'Instrução e Julgamento';
+    const voiceName = `🔊 [${cleanTipo}] ${numProcesso}`.substring(0, 99);
+
+    // Cria o canal de voz na seção TRIBUNAL DE JUSTIÇA
+    const voiceChannel = await guild.channels.create({
+      name: voiceName,
+      type: ChannelType.GuildVoice,
+      parent: category ? category.id : null
+    }).catch(() => null);
+
+    const cardEmbed = new EmbedBuilder()
+      .setTitle(`⚖️ AUDIÊNCIA JUDICIAL DESIGNADA`)
+      .setColor(0x3498db)
+      .addFields(
+        { name: '📂 Processo Vinculado', value: `\`${numProcesso}\``, inline: true },
+        { name: '📜 Tipo de Audiência', value: `**${cleanTipo}**`, inline: true },
+        { name: '📅 Data e Horário', value: `\`${dataAudiencia}\``, inline: false },
+        { name: '🔊 Sala de Áudio Criada', value: voiceChannel ? `<#${voiceChannel.id}>` : '*Falha ao criar sala de áudio*', inline: false },
+        { name: '👨‍⚖️ Juiz Designado', value: `<@${interaction.user.id}>`, inline: true }
+      )
+      .setFooter({ text: 'Tribunal de Justiça • Pauta Oficial de Audiências' })
+      .setTimestamp();
+
+    const btnDelete = new ButtonBuilder()
+      .setCustomId(`btn_excluir_audiencia_${voiceChannel ? voiceChannel.id : 'none'}`)
+      .setLabel('🗑️ Excluir Audiência')
+      .setStyle(ButtonStyle.Danger);
+
+    const rowDelete = new ActionRowBuilder().addComponents(btnDelete);
+
+    await interaction.reply({
+      content: `✅ **Audiência agendada com sucesso!**`,
+      embeds: [cardEmbed],
+      components: [rowDelete]
+    }).catch(() => null);
+    return;
+  }
+
+  // 3. Botão Excluir Audiência (Apaga canal de voz e card)
+  if (interaction.isButton() && interaction.customId.startsWith('btn_excluir_audiencia_')) {
+    const member = interaction.member;
+    const isJuiz = member && (
+      member.permissions.has(PermissionFlagsBits.Administrator) ||
+      member.roles.cache.some(r => r.name === 'J. Dir. | Juiz de Direito' || r.name.toLowerCase().includes('juiz'))
+    );
+
+    if (!isJuiz) {
+      return interaction.reply({
+        content: '⚠️ **Acesso Negado:** Apenas Juízes de Direito podem excluir ou encerrar audiências.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+
+    const voiceChannelId = interaction.customId.replace('btn_excluir_audiencia_', '');
+
+    if (voiceChannelId && voiceChannelId !== 'none') {
+      const vChan = await interaction.guild.channels.fetch(voiceChannelId).catch(() => null);
+      if (vChan) {
+        await vChan.delete('Audiência encerrada por Juiz de Direito').catch(() => null);
+      }
+    }
+
+    if (interaction.message && interaction.message.deletable) {
+      await interaction.message.delete().catch(() => {});
+    }
+
+    await interaction.reply({
+      content: '✅ **Audiência e canal de áudio excluídos com sucesso!**',
+      ephemeral: true
+    }).catch(() => null);
+    return;
   }
 
   if (interaction.isButton()) {
