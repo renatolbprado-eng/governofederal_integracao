@@ -229,23 +229,74 @@ function safeGetArray(obj) {
   return Object.values(obj);
 }
 
+// Helper robusto para localizar o Embed Inicial de Autuação do Processo (independente de quantas mensagens a thread tenha)
+async function getProcessStarterMessage(thread) {
+  try {
+    if (!thread || typeof thread.messages?.fetch !== 'function') return null;
+
+    // 1. Tenta buscar a mensagem inicial/starter nativa da thread (Discord API)
+    const starter = await thread.fetchStarterMessage().catch(() => null);
+    if (starter && starter.author.id === client.user.id && starter.embeds && starter.embeds.length > 0) {
+      return starter;
+    }
+
+    // 2. Tenta buscar a mensagem cujo ID é igual ao id da thread
+    const idMsg = await thread.messages.fetch(thread.id).catch(() => null);
+    if (idMsg && idMsg.author.id === client.user.id && idMsg.embeds && idMsg.embeds.length > 0) {
+      return idMsg;
+    }
+
+    // 3. Pega mensagens a partir do início da criação da thread (after: thread.id)
+    const firstMsgs = await thread.messages.fetch({ after: thread.id, limit: 30 }).catch(() => null);
+    if (firstMsgs && firstMsgs.size > 0) {
+      const msgsArray = safeGetArray(firstMsgs);
+      const botMsg = msgsArray
+        .filter(m => m && m.author && m.author.id === client.user.id && m.embeds && m.embeds.length > 0)
+        .sort((a, b) => a.createdTimestamp - b.createdTimestamp)[0];
+      if (botMsg) return botMsg;
+    }
+
+    // 4. Varredura no histórico completo desde o início (em lotes de 100 da mais antiga para a mais recente)
+    let allMsgs = [];
+    let lastId = null;
+    for (let i = 0; i < 5; i++) { // Varre até 500 mensagens
+      const fetchOptions = { limit: 100 };
+      if (lastId) fetchOptions.before = lastId;
+      const batch = await thread.messages.fetch(fetchOptions).catch(() => null);
+      if (!batch || batch.size === 0) break;
+      allMsgs.push(...safeGetArray(batch));
+      lastId = batch.last().id;
+      if (batch.size < 100) break;
+    }
+
+    if (allMsgs.length > 0) {
+      allMsgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+      const botMsg = allMsgs.find(m => m && m.author && m.author.id === client.user.id && m.embeds && m.embeds.length > 0);
+      if (botMsg) return botMsg;
+    }
+
+    return null;
+  } catch (err) {
+    console.error('Erro ao buscar mensagem inicial do processo:', err);
+    return null;
+  }
+}
+
 // Helper dinâmico para buscar envolvidos (incluindo advogados de ambos os lados) a partir do Embed Inicial
 async function getProcessParties(thread) {
   try {
-    const msgs = await thread.messages.fetch({ limit: 50 });
-    const botEmbedMsg = msgs.filter(m => m.author.id === client.user.id && m.embeds.length > 0)
-                             .sort((a, b) => a.createdTimestamp - b.createdTimestamp).first();
-    if (!botEmbedMsg) return null;
+    const botEmbedMsg = await getProcessStarterMessage(thread);
+    if (!botEmbedMsg || !botEmbedMsg.embeds || botEmbedMsg.embeds.length === 0) return null;
 
     const embed = botEmbedMsg.embeds[0];
-    const processIdField = embed.fields.find(f => f.name.includes('Número do Processo'));
+    const processIdField = embed.fields ? embed.fields.find(f => f.name.includes('Número do Processo')) : null;
     const processId = processIdField ? processIdField.value.replace(/`/g, '') : 'Não identificado';
     
-    const typeField = embed.fields.find(f => f.name.includes('Classe Processual'));
+    const typeField = embed.fields ? embed.fields.find(f => f.name.includes('Classe Processual')) : null;
     const type = typeField ? typeField.value : 'Ação judicial';
 
-    const authorField = embed.fields.find(f => f.name.includes('Discord do Autor'));
-    const defendantField = embed.fields.find(f => f.name.includes('Discord do Réu'));
+    const authorField = embed.fields ? embed.fields.find(f => f.name.includes('Discord do Autor')) : null;
+    const defendantField = embed.fields ? embed.fields.find(f => f.name.includes('Discord do Réu')) : null;
 
     const parseUserId = (fieldValue) => {
       if (!fieldValue) return null;
@@ -260,7 +311,7 @@ async function getProcessParties(thread) {
     const defendantUser = defendantId ? await client.users.fetch(defendantId).catch(() => null) : null;
 
     // Busca Advogados do Autor
-    const authorLawyersField = embed.fields.find(f => f.name.includes('Advogado(s) do Autor'));
+    const authorLawyersField = embed.fields ? embed.fields.find(f => f.name.includes('Advogado(s) do Autor')) : null;
     const authorLawyers = [];
     if (authorLawyersField) {
       const matches = [...authorLawyersField.value.matchAll(/<@!?(\d+)>/g)];
@@ -271,7 +322,7 @@ async function getProcessParties(thread) {
     }
 
     // Busca Advogados do Réu
-    const defendantLawyersField = embed.fields.find(f => f.name.includes('Advogado(s) do Réu'));
+    const defendantLawyersField = embed.fields ? embed.fields.find(f => f.name.includes('Advogado(s) do Réu')) : null;
     const defendantLawyers = [];
     if (defendantLawyersField) {
       const matches = [...defendantLawyersField.value.matchAll(/<@!?(\d+)>/g)];
@@ -2036,10 +2087,8 @@ client.on('messageCreate', async (message) => {
           return;
         }
 
-        // Atualização do Embed
-        const msgs = await message.channel.messages.fetch({ limit: 50 });
-        const botEmbedMsg = msgs.filter(m => m.author.id === client.user.id && m.embeds.length > 0)
-                                 .sort((a, b) => a.createdTimestamp - b.createdTimestamp).first();
+        // Atualização do Embed Inicial (independente do volume de mensagens na thread)
+        const botEmbedMsg = await getProcessStarterMessage(message.channel);
 
         if (botEmbedMsg) {
           const originalEmbed = botEmbedMsg.embeds[0];
@@ -2169,10 +2218,8 @@ client.on('messageCreate', async (message) => {
         // Adiciona a parte à thread
         await message.channel.members.add(mentionedUser.id).catch(() => null);
 
-        // Atualização do Embed
-        const msgs = await message.channel.messages.fetch({ limit: 50 });
-        const botEmbedMsg = msgs.filter(m => m.author.id === client.user.id && m.embeds.length > 0)
-                                 .sort((a, b) => a.createdTimestamp - b.createdTimestamp).first();
+        // Atualização do Embed Inicial (independente do volume de mensagens na thread)
+        const botEmbedMsg = await getProcessStarterMessage(message.channel);
 
         if (botEmbedMsg) {
           const originalEmbed = botEmbedMsg.embeds[0];
