@@ -1299,56 +1299,7 @@ client.on('messageCreate', async (message) => {
     });
   }
 
-  // Comando !intimar [@usuario1...]
-  if (contentLower.startsWith('!intimar')) {
-    await deleteCommandMessage();
-    if (!isCorregedoria) {
-      return message.channel.send(`❌ Apenas membros com o cargo **${ROLE_CORREGEDORIA_NOME}** podem usar este comando.`);
-    }
-    if (!message.channel.isThread()) {
-      return message.channel.send('❌ Este comando deve ser executado dentro de uma thread de denúncia ou post de processo!');
-    }
-    let targetUsers = Array.from(message.mentions.users.values());
-    if (targetUsers.length === 0) {
-      const threadMembers = await message.channel.members.fetch().catch(() => message.channel.members.cache);
-      targetUsers = Array.from(threadMembers.values())
-        .map(m => m.user)
-        .filter(u => u && !u.bot && u.id !== message.author.id);
-    }
-    if (targetUsers.length === 0) {
-      return message.channel.send('❌ Nenhum membro foi encontrado para ser intimado!');
-    }
-    const results = [];
-    for (const u of targetUsers) {
-      try {
-        const dmEmbed = new EmbedBuilder()
-          .setTitle('⚖️ INTIMAÇÃO OFICIAL • CORREGEDORIA-GERAL')
-          .setDescription(
-            `Você foi oficialmente **NOTIFICADO / INTIMADO** a comparecer aos autos do processo abaixo:\n\n` +
-            `📌 **Processo / Thread:** [Clique aqui para acessar o Processo](${message.channel.url})\n` +
-            `📜 **Servidor:** ${message.guild.name}\n` +
-            `✍️ **Expedido por:** <@${message.author.id}>\n\n` +
-            `⚠️ **Atenção:** O não comparecimento no prazo legal poderá acarretar sanções administrativas e revelia.`
-          )
-          .setColor('#e74c3c')
-          .setFooter({ text: 'Corregedoria-Geral • Sistema de Notificação' })
-          .setTimestamp();
 
-        await u.send({ embeds: [dmEmbed] });
-        results.push(`✅ <@${u.id}> (\`${u.tag}\`) - **Intimação entregue via DM com sucesso.**`);
-      } catch (err) {
-        results.push(`⚠️ <@${u.id}> (\`${u.tag}\`) - **Falha ao enviar DM (DMs fechadas).**`);
-      }
-    }
-    const reportEmbed = new EmbedBuilder()
-      .setTitle('📋 ATO PROCESSUAL • CERTIDÃO DE INTIMAÇÃO DE RÉUS E DEFESA')
-      .setDescription('Certifico e dou fé que procedi com a notificação/intimação oficial dos réus e advogados de defesa cadastrados nos autos:\n\n' + results.join('\n'))
-      .setColor('#9b59b6')
-      .setFooter({ text: 'Corregedoria-Geral • Certidão de Notificação' })
-      .setTimestamp();
-
-    return message.channel.send({ embeds: [reportEmbed] });
-  }
 
   // Comando !encerrar
   if (contentLower === '!encerrar') {
@@ -1960,9 +1911,20 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // COMANDO !INTIMAR / !INTIMAR-PROCESSO / !INTIMACAO
+    // COMANDO !INTIMAR / !INTIMAR-PROCESSO / !INTIMACAO (EXCLUSIVO PARA JUÍZES DE DIREITO)
     const cmdLower = content.toLowerCase();
     if (cmdLower.startsWith('!intimar-processo') || cmdLower.startsWith('!intimar-partes') || cmdLower.startsWith('!intimacao') || cmdLower.startsWith('!intimar')) {
+      const member = message.member;
+      const isJuiz = member && (
+        member.permissions.has(PermissionFlagsBits.Administrator) ||
+        member.roles.cache.some(r => r.name === 'J. Dir. | Juiz de Direito' || r.name.toLowerCase().includes('juiz'))
+      );
+
+      if (!isJuiz) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito podem expedir intimações judiciais nos autos do processo.').catch(() => null);
+        return;
+      }
+
       const args = content.split(' ');
       const option = (args[1] || 'todos').toLowerCase();
 
