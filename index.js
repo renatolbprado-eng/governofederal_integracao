@@ -1235,69 +1235,7 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // Comando !adv @usuario1 @usuario2...
-  if (contentLower.startsWith('!adv')) {
-    await deleteCommandMessage();
-    if (!isCorregedoria) {
-      return message.channel.send(`❌ Apenas membros com o cargo **${ROLE_CORREGEDORIA_NOME}** podem usar este comando.`);
-    }
-    if (!message.channel.isThread()) {
-      return message.channel.send('❌ Este comando deve ser executado dentro de uma thread de denúncia ou post de processo!');
-    }
-    const mentionedUsers = Array.from(message.mentions.users.values());
-    if (mentionedUsers.length === 0) {
-      return message.channel.send('❌ Por favor, mencione ao menos um advogado/procurador! Exemplo: `!adv @usuario1 @usuario2`');
-    }
-    for (const u of mentionedUsers) {
-      await message.channel.members.add(u.id).catch(() => {});
-    }
-    const advEmbed = new EmbedBuilder()
-      .setTitle('📜 ATO INTERNO • NOMEAÇÃO DE PROCURADORES')
-      .setDescription(
-        'Ficam oficialmente nomeados os seguintes membros para atuarem como **Procuradores / Advogados de Defesa** no presente processo:\n\n' +
-        mentionedUsers.map(u => `• <@${u.id}> (\`${u.tag}\`)`).join('\n')
-      )
-      .setColor('#3498db')
-      .setFooter({ text: 'Corregedoria-Geral • Ato Oficial de Nomeação' })
-      .setTimestamp();
 
-    return message.channel.send({
-      content: `🔔 ${mentionedUsers.map(u => `<@${u.id}>`).join(' ')} - Vocês foram nomeados para a defesa neste processo.`,
-      embeds: [advEmbed]
-    });
-  }
-
-  // Comando !reu @usuario1 @usuario2...
-  if (contentLower.startsWith('!reu')) {
-    await deleteCommandMessage();
-    if (!isCorregedoria) {
-      return message.channel.send(`❌ Apenas membros com o cargo **${ROLE_CORREGEDORIA_NOME}** podem usar este comando.`);
-    }
-    if (!message.channel.isThread()) {
-      return message.channel.send('❌ Este comando deve ser executado dentro de uma thread de denúncia ou post de processo!');
-    }
-    const mentionedUsers = Array.from(message.mentions.users.values());
-    if (mentionedUsers.length === 0) {
-      return message.channel.send('❌ Por favor, mencione ao menos um réu! Exemplo: `!reu @usuario1 @usuario2`');
-    }
-    for (const u of mentionedUsers) {
-      await message.channel.members.add(u.id).catch(() => {});
-    }
-    const reuEmbed = new EmbedBuilder()
-      .setTitle('📜 ATO INTERNO • INCLUSÃO DE POLO PASSIVO (RÉUS)')
-      .setDescription(
-        'Ficam oficialmente incluídos no polo passivo os seguintes membros cadastrados nos autos:\n\n' +
-        mentionedUsers.map(u => `• <@${u.id}> (\`${u.tag}\`)`).join('\n')
-      )
-      .setColor('#e67e22')
-      .setFooter({ text: 'Corregedoria-Geral • Inclusão de Réus' })
-      .setTimestamp();
-
-    return message.channel.send({
-      content: `🔔 ${mentionedUsers.map(u => `<@${u.id}>`).join(' ')} - Vocês foram incluídos como réus neste processo.`,
-      embeds: [reuEmbed]
-    });
-  }
 
 
 
@@ -2019,8 +1957,19 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // COMANDO !ADV (Adição interativa de advogados)
+    // COMANDO !ADV (Adição interativa de advogados por Juízes de Direito)
     if (content.toLowerCase() === '!adv') {
+      const member = message.member;
+      const isJuiz = member && (
+        member.permissions.has(PermissionFlagsBits.Administrator) ||
+        member.roles.cache.some(r => r.name === 'J. Dir. | Juiz de Direito' || r.name.toLowerCase().includes('juiz'))
+      );
+
+      if (!isJuiz) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito podem cadastrar ou vincular advogados/procuradores nos autos.').catch(() => null);
+        return;
+      }
+
       const messagesToDelete = [message];
       
       try {
@@ -2138,8 +2087,19 @@ client.on('messageCreate', async (message) => {
     }
 
 
-    // COMANDO !PARTES (Adição/Atualização interativa de Partes do processo no card inicial)
-    if (content.toLowerCase() === '!partes') {
+    // COMANDO !PARTES / !PARTE (Adição/Atualização interativa de Partes por Juízes de Direito)
+    if (content.toLowerCase() === '!partes' || content.toLowerCase() === '!parte') {
+      const member = message.member;
+      const isJuiz = member && (
+        member.permissions.has(PermissionFlagsBits.Administrator) ||
+        member.roles.cache.some(r => r.name === 'J. Dir. | Juiz de Direito' || r.name.toLowerCase().includes('juiz'))
+      );
+
+      if (!isJuiz) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito podem cadastrar ou alterar as partes nos autos do processo.').catch(() => null);
+        return;
+      }
+
       const messagesToDelete = [message];
       
       try {
