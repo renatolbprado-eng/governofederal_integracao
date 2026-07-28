@@ -1574,19 +1574,85 @@ client.on('messageCreate', async (message) => {
 
     const fullPrompt = prompt + referencedText;
 
-    const modelCandidates = [
-      'gemini-1.5-flash',
-      'gemini-1.5-pro',
-      'gemini-2.0-flash-exp',
-      'gemini-2.0-flash',
-      'gemini-pro'
-    ];
-
     let replyText = null;
     let lastError = null;
 
-    // 1. Tentativa via SDK oficial GoogleGenerativeAI
-    if (genAI) {
+    // 1. Descoberta Dinâmica de Modelos Autorizados no Google AI Studio
+    try {
+      const listEndpoints = [
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`
+      ];
+
+      let discoveredModels = [];
+
+      for (const ep of listEndpoints) {
+        try {
+          const listRes = await fetch(ep, {
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': apiKey
+            }
+          });
+
+          if (listRes.ok) {
+            const listData = await listRes.json();
+            if (listData && listData.models && Array.isArray(listData.models)) {
+              const valid = listData.models.filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'));
+              if (valid.length > 0) {
+                const isBeta = ep.includes('v1beta');
+                discoveredModels.push(...valid.map(m => ({
+                  rawName: m.name,
+                  cleanName: m.name.replace(/^models\//, ''),
+                  version: isBeta ? 'v1beta' : 'v1'
+                })));
+              }
+            }
+          } else {
+            const errTxt = await listRes.text();
+            try {
+              const errObj = JSON.parse(errTxt);
+              if (errObj?.error?.message) lastError = new Error(errObj.error.message);
+            } catch (e) {}
+          }
+        } catch (eList) {}
+      }
+
+      // Se encontrou modelos dinâmicos autorizados para a chave, tenta a geração
+      if (discoveredModels.length > 0) {
+        for (const item of discoveredModels) {
+          try {
+            // Tenta via REST com x-goog-api-key
+            const targetUrl = `https://generativelanguage.googleapis.com/${item.version}/models/${item.cleanName}:generateContent`;
+            const genRes = await fetch(targetUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': apiKey
+              },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: fullPrompt }] }]
+              })
+            });
+
+            if (genRes.ok) {
+              const genData = await genRes.json();
+              const txt = genData?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (txt) {
+                replyText = txt;
+                break;
+              }
+            }
+          } catch (eGen) {}
+        }
+      }
+    } catch (eDiscovery) {
+      console.warn('[IA Gemini Descoberta] Erro:', eDiscovery.message);
+    }
+
+    // 2. Fallback via SDK caso a descoberta dinamica nao tenha retornado texto
+    if (!replyText && genAI) {
+      const modelCandidates = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp', 'gemini-2.0-flash', 'gemini-pro'];
       for (const modelName of modelCandidates) {
         try {
           const model = genAI.getGenerativeModel({ model: modelName });
@@ -1599,103 +1665,14 @@ client.on('messageCreate', async (message) => {
           }
         } catch (errModel) {
           lastError = errModel;
-          console.warn(`[IA Gemini SDK] Modelo "${modelName}" indisponível:`, errModel?.message);
-        }
-      }
-    }
-
-    // 2. Fallback direto via REST HTTP com suporte estrito a chaves em formato AQ.Ab... (x-goog-api-key e Bearer)
-    if (!replyText && apiKey) {
-      const restModels = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp', 'gemini-2.0-flash', 'gemini-pro'];
-      const apiVersions = ['v1beta', 'v1'];
-
-      for (const ver of apiVersions) {
-        if (replyText) break;
-
-        for (const mName of restModels) {
-          if (replyText) break;
-
-          try {
-            const urlBase = `https://generativelanguage.googleapis.com/${ver}/models/${mName}:generateContent`;
-
-            // Método A: via Header x-goog-api-key (formato nativo de chaves AQ.Ab...)
-            const resA = await fetch(urlBase, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-goog-api-key': apiKey
-              },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: fullPrompt }] }]
-              })
-            });
-
-            if (resA.ok) {
-              const dataA = await resA.json();
-              const textA = dataA?.candidates?.[0]?.content?.parts?.[0]?.text;
-              if (textA) {
-                replyText = textA;
-                break;
-              }
-            }
-
-            // Método B: via Header Authorization Bearer (caso a chave AQ.Ab seja um token OAuth/Serviço)
-            const resB = await fetch(urlBase, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-              },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: fullPrompt }] }]
-              })
-            });
-
-            if (resB.ok) {
-              const dataB = await resB.json();
-              const textB = dataB?.candidates?.[0]?.content?.parts?.[0]?.text;
-              if (textB) {
-                replyText = textB;
-                break;
-              }
-            }
-
-            // Método C: via query parameter ?key=
-            const urlQuery = `${urlBase}?key=${apiKey}`;
-            const resC = await fetch(urlQuery, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: fullPrompt }] }]
-              })
-            });
-
-            if (resC.ok) {
-              const dataC = await resC.json();
-              const textC = dataC?.candidates?.[0]?.content?.parts?.[0]?.text;
-              if (textC) {
-                replyText = textC;
-                break;
-              }
-            } else {
-              const errBody = await resC.text();
-              try {
-                const errJson = JSON.parse(errBody);
-                if (errJson?.error?.message) lastError = new Error(errJson.error.message);
-              } catch (e) {}
-            }
-
-          } catch (eRest) {
-            console.warn(`[IA Gemini Direct REST] Erro em ${mName} (${ver}):`, eRest.message);
-          }
         }
       }
     }
 
     if (!replyText) {
-      console.error('Erro ao gerar resposta com Gemini em todos os modelos e endpoints REST:', lastError);
-      const errDetail = lastError?.message ? lastError.message.substring(0, 300) : 'Modelos indisponíveis';
-      await message.reply(`❌ **Erro ao processar a requisição da IA:** \`${errDetail}\`\nVerifique se a chave \`GEMINI_API_KEY\` no Render / .env foi criada no Google AI Studio (aistudio.google.com).`).catch(() => null);
+      console.error('Erro ao gerar resposta com Gemini:', lastError);
+      const errDetail = lastError?.message ? lastError.message.substring(0, 300) : 'Nenhum modelo Gemini ativado para a chave';
+      await message.reply(`❌ **Erro ao processar a requisição da IA:** \`${errDetail}\`\nVerifique se a API do Gemini está ativada no Google AI Studio (aistudio.google.com).`).catch(() => null);
       return;
     }
 
