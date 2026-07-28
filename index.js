@@ -3,17 +3,17 @@ import dotenv from 'dotenv';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 dotenv.config();
 
 // Inicialização da IA Gemini (se a chave estiver no .env)
-let ai = null;
+let genAI = null;
 if (process.env.GEMINI_API_KEY) {
   try {
-    ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   } catch (e) {
-    console.error('Erro ao inicializar o cliente Gemini:', e);
+    console.error('Erro ao inicializar o cliente GoogleGenerativeAI:', e);
   }
 }
 
@@ -1522,17 +1522,17 @@ client.on('messageCreate', async (message) => {
 
     await message.channel.sendTyping().catch(() => null);
 
-    if (!ai && process.env.GEMINI_API_KEY) {
+    if (!genAI && process.env.GEMINI_API_KEY) {
       try {
-        ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
       } catch (e) {
         console.error('Erro ao instanciar Gemini:', e);
       }
     }
 
-    if (!ai) {
+    if (!genAI) {
       await message.reply(
-        '🤖 **IA Assistente (Dr. Renato):** A funcionalidade !ia está ativada para você! Para conectar com o modelo Gemini ao vivo, configure a variável `GEMINI_API_KEY` no seu arquivo `.env`.'
+        '🤖 **IA Assistente (Dr. Renato):** A funcionalidade !ia está ativada para você! Para conectar com o modelo Gemini ao vivo, configure a variável `GEMINI_API_KEY` no seu arquivo `.env` ou Render.'
       ).catch(() => null);
       return;
     }
@@ -1567,13 +1567,10 @@ client.on('messageCreate', async (message) => {
     const fullPrompt = prompt + referencedText;
 
     const modelCandidates = [
-      'gemini-2.5-flash',
-      'gemini-2.0-flash',
       'gemini-1.5-flash',
-      'gemini-2.5-pro',
-      'gemini-2.0-flash-lite',
-      'models/gemini-2.0-flash',
-      'models/gemini-1.5-flash'
+      'gemini-1.5-pro',
+      'gemini-2.0-flash-exp',
+      'gemini-pro'
     ];
 
     let replyText = null;
@@ -1581,12 +1578,12 @@ client.on('messageCreate', async (message) => {
 
     for (const modelName of modelCandidates) {
       try {
-        const response = await ai.models.generateContent({
-          model: modelName,
-          contents: fullPrompt,
-        });
-        if (response && response.text) {
-          replyText = response.text;
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(fullPrompt);
+        const response = await result.response;
+        const text = response.text();
+        if (text) {
+          replyText = text;
           break;
         }
       } catch (errModel) {
