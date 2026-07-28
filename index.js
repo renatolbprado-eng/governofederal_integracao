@@ -1566,38 +1566,53 @@ client.on('messageCreate', async (message) => {
 
     const fullPrompt = prompt + referencedText;
 
-    try {
-      let response;
-      try {
-        response = await ai.models.generateContent({
-          model: 'gemini-2.0-flash',
-          contents: fullPrompt,
-        });
-      } catch (err20) {
-        console.warn('Fallback para gemini-1.5-flash devido a erro:', err20?.message);
-        response = await ai.models.generateContent({
-          model: 'gemini-1.5-flash',
-          contents: fullPrompt,
-        });
-      }
+    const modelCandidates = [
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+      'gemini-2.5-pro',
+      'gemini-2.0-flash-lite',
+      'models/gemini-2.0-flash',
+      'models/gemini-1.5-flash'
+    ];
 
-      const replyText = response.text || 'Não recebi uma resposta válida da IA.';
-      if (replyText.length <= 1900) {
-        await message.reply(`🤖 **IA Assistente (Dr. Renato):**\n${replyText}`).catch(() => null);
-      } else {
-        const chunks = replyText.match(/[\s\S]{1,1900}/g) || [replyText];
-        for (let i = 0; i < chunks.length; i++) {
-          if (i === 0) {
-            await message.reply(`🤖 **IA Assistente (Parte 1/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
-          } else {
-            await message.channel.send(`🤖 **(Parte ${i + 1}/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
-          }
+    let replyText = null;
+    let lastError = null;
+
+    for (const modelName of modelCandidates) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: fullPrompt,
+        });
+        if (response && response.text) {
+          replyText = response.text;
+          break;
+        }
+      } catch (errModel) {
+        lastError = errModel;
+        console.warn(`[IA Gemini] Modelo "${modelName}" indisponível:`, errModel?.message);
+      }
+    }
+
+    if (!replyText) {
+      console.error('Erro ao gerar resposta com Gemini em todos os modelos:', lastError);
+      const errDetail = lastError?.message ? lastError.message.substring(0, 300) : 'Modelos indisponíveis';
+      await message.reply(`❌ **Erro ao processar a requisição da IA:** \`${errDetail}\`\nVerifique se a chave \`GEMINI_API_KEY\` no Render / .env possui permissões ativas.`).catch(() => null);
+      return;
+    }
+
+    if (replyText.length <= 1900) {
+      await message.reply(`🤖 **IA Assistente (Dr. Renato):**\n${replyText}`).catch(() => null);
+    } else {
+      const chunks = replyText.match(/[\s\S]{1,1900}/g) || [replyText];
+      for (let i = 0; i < chunks.length; i++) {
+        if (i === 0) {
+          await message.reply(`🤖 **IA Assistente (Parte 1/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
+        } else {
+          await message.channel.send(`🤖 **(Parte ${i + 1}/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
         }
       }
-    } catch (err) {
-      console.error('Erro ao gerar resposta com Gemini:', err);
-      const errDetail = err?.message ? err.message.substring(0, 300) : 'Erro de conexão/autenticação';
-      await message.reply(`❌ **Erro ao processar a requisição da IA:** \`${errDetail}\`\nVerifique as variáveis de ambiente no Render / .env.`).catch(() => null);
     }
     return;
   }
