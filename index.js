@@ -1577,6 +1577,8 @@ client.on('messageCreate', async (message) => {
     let replyText = null;
     let lastError = null;
 
+    const systemInstruction = "Você é o assistente virtual jurídico do Dr. Renato. Responda DIRETAMENTE à solicitação ou pergunta do usuário. NUNCA exiba rascunhos, planos, interpretações de linguagem, opções de rascunho (Drafting), ou seu raciocínio interno (Chain of Thought). Entregue apenas a resposta final limpa e direta em português.";
+
     // 1. Descoberta Dinâmica de Modelos Autorizados no Google AI Studio
     try {
       const listEndpoints = [
@@ -1608,12 +1610,6 @@ client.on('messageCreate', async (message) => {
                 })));
               }
             }
-          } else {
-            const errTxt = await listRes.text();
-            try {
-              const errObj = JSON.parse(errTxt);
-              if (errObj?.error?.message) lastError = new Error(errObj.error.message);
-            } catch (e) {}
           }
         } catch (eList) {}
       }
@@ -1622,7 +1618,6 @@ client.on('messageCreate', async (message) => {
       if (discoveredModels.length > 0) {
         for (const item of discoveredModels) {
           try {
-            // Tenta via REST com x-goog-api-key
             const targetUrl = `https://generativelanguage.googleapis.com/${item.version}/models/${item.cleanName}:generateContent`;
             const genRes = await fetch(targetUrl, {
               method: 'POST',
@@ -1631,6 +1626,7 @@ client.on('messageCreate', async (message) => {
                 'x-goog-api-key': apiKey
               },
               body: JSON.stringify({
+                system_instruction: { parts: [{ text: systemInstruction }] },
                 contents: [{ parts: [{ text: fullPrompt }] }]
               })
             });
@@ -1655,7 +1651,10 @@ client.on('messageCreate', async (message) => {
       const modelCandidates = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp', 'gemini-2.0-flash', 'gemini-pro'];
       for (const modelName of modelCandidates) {
         try {
-          const model = genAI.getGenerativeModel({ model: modelName });
+          const model = genAI.getGenerativeModel({ 
+            model: modelName,
+            systemInstruction: systemInstruction 
+          });
           const result = await model.generateContent(fullPrompt);
           const response = await result.response;
           const text = response.text();
@@ -1676,17 +1675,18 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    if (!replyText) {
-      console.error('Erro ao gerar resposta com Gemini em todos os modelos:', lastError);
-      const errDetail = lastError?.message ? lastError.message.substring(0, 300) : 'Modelos indisponíveis';
-      await message.reply(`❌ **Erro ao processar a requisição da IA:** \`${errDetail}\`\nVerifique se a chave \`GEMINI_API_KEY\` no Render / .env possui permissões ativas.`).catch(() => null);
-      return;
-    }
+    // Limpeza de blocos de pensamento/raciocínio se o modelo vazar tags de CoT
+    let cleanReplyText = replyText;
+    cleanReplyText = cleanReplyText.replace(/<thought>[\s\S]*?<\/thought>/gi, '');
+    cleanReplyText = cleanReplyText.replace(/Input:[\s\S]*?Drafting the response:?/gi, '');
+    cleanReplyText = cleanReplyText.trim();
 
-    if (replyText.length <= 1900) {
-      await message.reply(`🤖 **IA Assistente (Dr. Renato):**\n${replyText}`).catch(() => null);
+    if (!cleanReplyText) cleanReplyText = replyText;
+
+    if (cleanReplyText.length <= 1900) {
+      await message.reply(`🤖 **IA Assistente (Dr. Renato):**\n${cleanReplyText}`).catch(() => null);
     } else {
-      const chunks = replyText.match(/[\s\S]{1,1900}/g) || [replyText];
+      const chunks = cleanReplyText.match(/[\s\S]{1,1900}/g) || [cleanReplyText];
       for (let i = 0; i < chunks.length; i++) {
         if (i === 0) {
           await message.reply(`🤖 **IA Assistente (Parte 1/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
