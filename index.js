@@ -1497,9 +1497,69 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // COMANDO !IA ou !GEMINI (Temporariamente Desativado)
+  // COMANDO !IA ou !GEMINI (Ativo exclusivamente para o Dr. Renato)
   if (content.toLowerCase().startsWith('!ia') || content.toLowerCase().startsWith('!gemini')) {
-    await message.reply('⚠️ **Aviso:** O comando de Inteligência Artificial (!ia) está temporariamente desativado.').catch(() => null);
+    const authorTag = message.author.tag ? message.author.tag.toLowerCase() : '';
+    const usernameLower = message.author.username.toLowerCase();
+    const displayNameLower = message.member?.displayName?.toLowerCase() || '';
+
+    const isDrRenato = usernameLower.includes('renat') || 
+                       displayNameLower.includes('renat') || 
+                       usernameLower.includes('dr.renato') || 
+                       displayNameLower.includes('dr.renato') ||
+                       authorTag.includes('renat');
+
+    if (!isDrRenato) {
+      await message.reply('⚠️ **Acesso Negado:** O comando de Inteligência Artificial (!ia) é de uso exclusivo do **Dr. Renato**.').catch(() => null);
+      return;
+    }
+
+    const prompt = content.replace(/^!(ia|gemini)/i, '').trim();
+    if (!prompt) {
+      await message.reply('⚠️ **Uso do Comando:** `!ia <sua pergunta ou instrução>`').catch(() => null);
+      return;
+    }
+
+    await message.channel.sendTyping().catch(() => null);
+
+    if (!ai && process.env.GEMINI_API_KEY) {
+      try {
+        ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      } catch (e) {
+        console.error('Erro ao instanciar Gemini:', e);
+      }
+    }
+
+    if (!ai) {
+      await message.reply(
+        '🤖 **IA Assistente (Dr. Renato):** A funcionalidade !ia está ativada para você! Para conectar com o modelo Gemini ao vivo, configure a variável `GEMINI_API_KEY` no seu arquivo `.env`.'
+      ).catch(() => null);
+      return;
+    }
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+
+      const replyText = response.text || 'Não recebi uma resposta válida da IA.';
+      if (replyText.length <= 1900) {
+        await message.reply(`🤖 **IA Assistente (Dr. Renato):**\n${replyText}`).catch(() => null);
+      } else {
+        const chunks = replyText.match(/[\s\S]{1,1900}/g) || [replyText];
+        for (let i = 0; i < chunks.length; i++) {
+          if (i === 0) {
+            await message.reply(`🤖 **IA Assistente (Parte 1/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
+          } else {
+            await message.channel.send(`🤖 **(Parte ${i + 1}/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao gerar resposta com Gemini:', err);
+      await message.reply('❌ **Erro ao processar a requisição da IA.** Verifique se a chave GEMINI_API_KEY no `.env` está correta.').catch(() => null);
+    }
     return;
   }
 
