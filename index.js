@@ -1604,36 +1604,90 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    // 2. Fallback direto via REST HTTP caso a SDK falhe/lance 404
+    // 2. Fallback direto via REST HTTP com suporte estrito a chaves em formato AQ.Ab... (x-goog-api-key e Bearer)
     if (!replyText && apiKey) {
       const restModels = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp', 'gemini-2.0-flash', 'gemini-pro'];
-      for (const mName of restModels) {
-        try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent?key=${apiKey}`;
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: fullPrompt }] }]
-            })
-          });
-          if (res.ok) {
-            const data = await res.json();
-            const textCandidate = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (textCandidate) {
-              replyText = textCandidate;
-              break;
+      const apiVersions = ['v1beta', 'v1'];
+
+      for (const ver of apiVersions) {
+        if (replyText) break;
+
+        for (const mName of restModels) {
+          if (replyText) break;
+
+          try {
+            const urlBase = `https://generativelanguage.googleapis.com/${ver}/models/${mName}:generateContent`;
+
+            // Método A: via Header x-goog-api-key (formato nativo de chaves AQ.Ab...)
+            const resA = await fetch(urlBase, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': apiKey
+              },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: fullPrompt }] }]
+              })
+            });
+
+            if (resA.ok) {
+              const dataA = await resA.json();
+              const textA = dataA?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (textA) {
+                replyText = textA;
+                break;
+              }
             }
-          } else {
-            const errBody = await res.text();
-            console.warn(`[IA Gemini Direct REST] Modelo ${mName} retornou HTTP ${res.status}:`, errBody);
-            try {
-              const errJson = JSON.parse(errBody);
-              if (errJson?.error?.message) lastError = new Error(errJson.error.message);
-            } catch (e) {}
+
+            // Método B: via Header Authorization Bearer (caso a chave AQ.Ab seja um token OAuth/Serviço)
+            const resB = await fetch(urlBase, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+              },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: fullPrompt }] }]
+              })
+            });
+
+            if (resB.ok) {
+              const dataB = await resB.json();
+              const textB = dataB?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (textB) {
+                replyText = textB;
+                break;
+              }
+            }
+
+            // Método C: via query parameter ?key=
+            const urlQuery = `${urlBase}?key=${apiKey}`;
+            const resC = await fetch(urlQuery, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: fullPrompt }] }]
+              })
+            });
+
+            if (resC.ok) {
+              const dataC = await resC.json();
+              const textC = dataC?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (textC) {
+                replyText = textC;
+                break;
+              }
+            } else {
+              const errBody = await resC.text();
+              try {
+                const errJson = JSON.parse(errBody);
+                if (errJson?.error?.message) lastError = new Error(errJson.error.message);
+              } catch (e) {}
+            }
+
+          } catch (eRest) {
+            console.warn(`[IA Gemini Direct REST] Erro em ${mName} (${ver}):`, eRest.message);
           }
-        } catch (eRest) {
-          console.warn(`[IA Gemini Direct REST] Erro ao chamar ${mName}:`, eRest.message);
         }
       }
     }
