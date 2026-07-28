@@ -1609,19 +1609,17 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    // 2. Fallback via REST HTTP caso necessário
+    // 2. Fallback via REST HTTP com captura minuciosa do erro retornado pelo Google
     if (!replyText && apiKey) {
       for (const mName of modelCandidates) {
         try {
-          const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent`;
+          const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent?key=${apiKey}`;
           const genRes = await fetch(targetUrl, {
             method: 'POST',
             headers: {
-              'Content-Type': 'application/json',
-              'x-goog-api-key': apiKey
+              'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-              system_instruction: { parts: [{ text: systemInstruction }] },
               contents: [{ parts: [{ text: fullPrompt }] }]
             })
           });
@@ -1633,8 +1631,19 @@ client.on('messageCreate', async (message) => {
               replyText = txt;
               break;
             }
+          } else {
+            const errTxt = await genRes.text();
+            console.warn(`[IA Gemini REST ${mName}] HTTP ${genRes.status}:`, errTxt);
+            try {
+              const errObj = JSON.parse(errTxt);
+              if (errObj?.error?.message) {
+                lastError = new Error(`Google API (HTTP ${genRes.status}): ${errObj.error.message}`);
+              }
+            } catch (e) {}
           }
-        } catch (eGen) {}
+        } catch (eGen) {
+          console.warn(`[IA Gemini REST ${mName}] Exception:`, eGen.message);
+        }
       }
     }
 
