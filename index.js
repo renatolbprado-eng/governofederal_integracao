@@ -1579,13 +1579,15 @@ client.on('messageCreate', async (message) => {
 
     const systemInstruction = "Você é o assistente virtual jurídico do Dr. Renato. Responda DIRETAMENTE à solicitação ou pergunta do usuário. NUNCA exiba rascunhos, planos, interpretações de linguagem, opções de rascunho (Drafting), ou seu raciocínio interno (Chain of Thought). Entregue apenas a resposta final limpa e direta em português.";
 
-    // Prioriza o modelo gemini-1.5-flash / gemini-1.5-pro que NAO expõem o processo de raciocínio interno (Thinking/CoT)
+    // Modelos oficiais do Google AI Studio (incluindo cURL quickstart gemini-flash-latest e gemini-2.5-flash)
     const modelCandidates = [
-      'gemini-1.5-flash',
-      'gemini-1.5-pro',
-      'gemini-2.0-flash-lite',
+      'gemini-flash-latest',
+      'gemini-2.5-flash',
       'gemini-2.0-flash',
-      'gemini-pro'
+      'gemini-1.5-flash',
+      'gemini-2.5-pro',
+      'gemini-1.5-pro',
+      'gemini-2.0-flash-lite'
     ];
 
     // 1. Tenta a geração via SDK oficial
@@ -1609,15 +1611,16 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    // 2. Fallback via REST HTTP com captura minuciosa do erro retornado pelo Google
+    // 2. Fallback via REST HTTP com cabeçalhos oficiais da documentação cURL Quickstart do Google
     if (!replyText && apiKey) {
       for (const mName of modelCandidates) {
         try {
-          const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent?key=${apiKey}`;
+          const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent`;
           const genRes = await fetch(targetUrl, {
             method: 'POST',
             headers: {
-              'Content-Type': 'application/json'
+              'Content-Type': 'application/json',
+              'X-goog-api-key': apiKey
             },
             body: JSON.stringify({
               contents: [{ parts: [{ text: fullPrompt }] }]
@@ -1632,14 +1635,31 @@ client.on('messageCreate', async (message) => {
               break;
             }
           } else {
-            const errTxt = await genRes.text();
-            console.warn(`[IA Gemini REST ${mName}] HTTP ${genRes.status}:`, errTxt);
-            try {
-              const errObj = JSON.parse(errTxt);
-              if (errObj?.error?.message) {
-                lastError = new Error(`Google API (HTTP ${genRes.status}): ${errObj.error.message}`);
+            // Se o header X-goog-api-key falhar, tenta via query param ?key=
+            const queryUrl = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent?key=${apiKey}`;
+            const resQuery = await fetch(queryUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ contents: [{ parts: [{ text: fullPrompt }] }] })
+            });
+
+            if (resQuery.ok) {
+              const dataQ = await resQuery.json();
+              const txtQ = dataQ?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (txtQ) {
+                replyText = txtQ;
+                break;
               }
-            } catch (e) {}
+            } else {
+              const errTxt = await resQuery.text();
+              console.warn(`[IA Gemini REST ${mName}] HTTP ${resQuery.status}:`, errTxt);
+              try {
+                const errObj = JSON.parse(errTxt);
+                if (errObj?.error?.message) {
+                  lastError = new Error(`Google API (${mName}): ${errObj.error.message}`);
+                }
+              } catch (e) {}
+            }
           }
         } catch (eGen) {
           console.warn(`[IA Gemini REST ${mName}] Exception:`, eGen.message);
