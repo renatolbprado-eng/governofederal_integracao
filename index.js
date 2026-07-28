@@ -43,6 +43,9 @@ let openWarrants = [];
 const pendingRoleSelections = new Map();
 const pendingManualRoleInput = new Map();
 
+// Cache de respostas privadas da IA (!ia privada)
+const privateIaResponses = new Map();
+
 // --- CONSTANTES E MAPAS DA CORREGEDORIA & TRIANGULAÇÃO ---
 const ROLE_CORREGEDORIA_NOME = '「CRRGD」・ Corregedoria Geral';
 const ROLE_CORP_NOME = '「CORP」Membro De Corporação';
@@ -1526,6 +1529,51 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
+    const promptLower = prompt.toLowerCase();
+
+    // 1. Verificação ESTRITA de pedido de exclusão de mensagens
+    const hasDeleteIntent = (promptLower.includes('apague') || 
+                             promptLower.includes('delete') || 
+                             promptLower.includes('limpe') || 
+                             promptLower.includes('exclua') || 
+                             promptLower.includes('remova') || 
+                             promptLower.includes('remover')) && 
+                            (promptLower.includes('mensagem') || promptLower.includes('mensagens') || promptLower.includes('chat') || promptLower.includes('historico') || promptLower.includes('histórico'));
+
+    if (hasDeleteIntent) {
+      const numberMatch = promptLower.match(/(\d+)/);
+      let count = numberMatch ? parseInt(numberMatch[1], 10) : 1;
+      if (isNaN(count) || count < 1) count = 1;
+      if (count > 100) count = 100;
+
+      try {
+        await message.delete().catch(() => null);
+        const msgsToDelete = await message.channel.messages.fetch({ limit: count }).catch(() => null);
+        if (msgsToDelete && msgsToDelete.size > 0) {
+          const deletable = safeGetArray(msgsToDelete);
+          for (const m of deletable) {
+            await m.delete().catch(() => null);
+          }
+        }
+
+        const confirmText = `🗑️ **IA Assistente:** ${count} mensagem(ns) excluída(s) com sucesso a pedido do Dr. Renato.`;
+        const tempMsg = await message.channel.send(confirmText).catch(() => null);
+        if (tempMsg) setTimeout(() => tempMsg.delete().catch(() => null), 4000);
+        return;
+      } catch (errDelete) {
+        console.error('Erro ao excluir mensagens a pedido do usuário:', errDelete);
+      }
+    }
+
+    // 2. Verificação de resposta Privada vs Pública
+    const isPrivate = promptLower.includes('privad') || 
+                      promptLower.includes('só pra mim') || 
+                      promptLower.includes('so pra mim') || 
+                      promptLower.includes('apenas pra mim') || 
+                      promptLower.includes('apenas para mim') || 
+                      promptLower.includes('secreto') || 
+                      promptLower.includes('em segredo');
+
     await message.channel.sendTyping().catch(() => null);
 
     const apiKey = getCleanApiKey();
@@ -1614,7 +1662,7 @@ client.on('messageCreate', async (message) => {
 
     const systemInstruction = "Você é o assistente virtual jurídico do Dr. Renato. Responda DIRETAMENTE à solicitação ou pergunta do usuário. NUNCA exiba rascunhos, planos, interpretações de linguagem, opções de rascunho (Drafting), ou seu raciocínio interno (Chain of Thought). Entregue apenas a resposta final limpa e direta em português.";
 
-    // Modelos oficiais do Google AI Studio (incluindo cURL quickstart gemini-flash-latest e gemini-2.5-flash)
+    // Prioriza o modelo gemini-1.5-flash / gemini-1.5-pro que NAO expõem o processo de raciocínio interno (Thinking/CoT)
     const modelCandidates = [
       'gemini-flash-latest',
       'gemini-2.5-flash',
@@ -1646,7 +1694,7 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    // 2. Fallback via REST HTTP com cabeçalhos oficiais da documentação cURL Quickstart do Google
+    // 2. Fallback via REST HTTP caso necessário
     if (!replyText && apiKey) {
       for (const mName of modelCandidates) {
         try {
@@ -1658,6 +1706,7 @@ client.on('messageCreate', async (message) => {
               'X-goog-api-key': apiKey
             },
             body: JSON.stringify({
+              system_instruction: { parts: [{ text: systemInstruction }] },
               contents: [{ parts: [{ text: fullPrompt }] }]
             })
           });
@@ -1669,36 +1718,8 @@ client.on('messageCreate', async (message) => {
               replyText = txt;
               break;
             }
-          } else {
-            // Se o header X-goog-api-key falhar, tenta via query param ?key=
-            const queryUrl = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent?key=${apiKey}`;
-            const resQuery = await fetch(queryUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ contents: [{ parts: [{ text: fullPrompt }] }] })
-            });
-
-            if (resQuery.ok) {
-              const dataQ = await resQuery.json();
-              const txtQ = dataQ?.candidates?.[0]?.content?.parts?.[0]?.text;
-              if (txtQ) {
-                replyText = txtQ;
-                break;
-              }
-            } else {
-              const errTxt = await resQuery.text();
-              console.warn(`[IA Gemini REST ${mName}] HTTP ${resQuery.status}:`, errTxt);
-              try {
-                const errObj = JSON.parse(errTxt);
-                if (errObj?.error?.message) {
-                  lastError = new Error(`Google API (${mName}): ${errObj.error.message}`);
-                }
-              } catch (e) {}
-            }
           }
-        } catch (eGen) {
-          console.warn(`[IA Gemini REST ${mName}] Exception:`, eGen.message);
-        }
+        } catch (eGen) {}
       }
     }
 
@@ -1712,9 +1733,7 @@ client.on('messageCreate', async (message) => {
     // Algoritmo estrito de extração para descartar rascunhos ("Draft 1:", "Self-Correction:", "Constraint Checklist", etc.)
     let cleanReplyText = replyText;
 
-    // Se contiver padrões de raciocínio/thinking do Gemini 2.0 (Self-Correction, Constraint Checklist, Drafts)
     if (cleanReplyText.includes('Constraint Checklist') || cleanReplyText.includes('Self-Correction') || cleanReplyText.includes('User input:')) {
-      // Extrai apenas o último bloco de texto entre aspas ou após o último trecho de Self-Correction
       const quoteMatches = [...cleanReplyText.matchAll(/"([^"]{10,})"/g)];
       if (quoteMatches.length > 0) {
         cleanReplyText = quoteMatches[quoteMatches.length - 1][1];
@@ -1730,15 +1749,34 @@ client.on('messageCreate', async (message) => {
 
     if (!cleanReplyText) cleanReplyText = replyText;
 
-    if (cleanReplyText.length <= 1900) {
-      await message.reply(`🤖 **IA Assistente (Dr. Renato):**\n${cleanReplyText}`).catch(() => null);
+    // Envio Privado vs Público
+    if (isPrivate) {
+      const btnId = `btn_ia_private_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      privateIaResponses.set(btnId, { text: cleanReplyText, userId: message.author.id });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(btnId)
+          .setLabel('🔒 Ver Resposta Privada (Apenas Dr. Renato)')
+          .setStyle(ButtonStyle.Secondary)
+          .setEmoji('🔒')
+      );
+
+      await message.channel.send({
+        content: `🔒 **IA Assistente:** Resposta privativa gerada exclusivamente para <@${message.author.id}>.`,
+        components: [row]
+      }).catch(() => null);
     } else {
-      const chunks = cleanReplyText.match(/[\s\S]{1,1900}/g) || [cleanReplyText];
-      for (let i = 0; i < chunks.length; i++) {
-        if (i === 0) {
-          await message.reply(`🤖 **IA Assistente (Parte 1/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
-        } else {
-          await message.channel.send(`🤖 **(Parte ${i + 1}/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
+      if (cleanReplyText.length <= 1900) {
+        await message.reply(`🤖 **IA Assistente (Dr. Renato):**\n${cleanReplyText}`).catch(() => null);
+      } else {
+        const chunks = cleanReplyText.match(/[\s\S]{1,1900}/g) || [cleanReplyText];
+        for (let i = 0; i < chunks.length; i++) {
+          if (i === 0) {
+            await message.reply(`🤖 **IA Assistente (Parte 1/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
+          } else {
+            await message.channel.send(`🤖 **(Parte ${i + 1}/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
+          }
         }
       }
     }
@@ -4359,6 +4397,28 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isButton()) {
+    // BOTAO DE RESPOSTA PRIVADA DA IA (!ia privada)
+    if (interaction.customId.startsWith('btn_ia_private_')) {
+      const data = privateIaResponses.get(interaction.customId);
+      if (!data) {
+        return interaction.reply({ content: '⏳ Esta resposta privada expirou ou não está mais no cache.', ephemeral: true }).catch(() => null);
+      }
+      if (interaction.user.id !== data.userId) {
+        return interaction.reply({ content: '⚠️ **Acesso Negado:** Apenas o Dr. Renato pode visualizar esta resposta privada.', ephemeral: true }).catch(() => null);
+      }
+
+      if (data.text.length <= 1900) {
+        await interaction.reply({ content: `🤖 **IA Assistente (Resposta Privada):**\n${data.text}`, ephemeral: true }).catch(() => null);
+      } else {
+        const chunks = data.text.match(/[\s\S]{1,1900}/g) || [data.text];
+        await interaction.reply({ content: `🤖 **IA Assistente (Parte 1/${chunks.length} - Privada):**\n${chunks[0]}`, ephemeral: true }).catch(() => null);
+        for (let i = 1; i < chunks.length; i++) {
+          await interaction.followUp({ content: `🤖 **(Parte ${i + 1}/${chunks.length} - Privada):**\n${chunks[i]}`, ephemeral: true }).catch(() => null);
+        }
+      }
+      return;
+    }
+
     if (interaction.customId === 'btn_abrir_globo') {
       try {
         const modal = new ModalBuilder()
