@@ -7,11 +7,17 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 
 dotenv.config();
 
+function getCleanApiKey() {
+  const rawKey = process.env.GEMINI_API_KEY || '';
+  return rawKey.trim().replace(/^["']|["']$/g, '');
+}
+
 // Inicialização da IA Gemini (se a chave estiver no .env)
 let genAI = null;
-if (process.env.GEMINI_API_KEY) {
+const cleanApiKey = getCleanApiKey();
+if (cleanApiKey) {
   try {
-    genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    genAI = new GoogleGenerativeAI(cleanApiKey);
   } catch (e) {
     console.error('Erro ao inicializar o cliente GoogleGenerativeAI:', e);
   }
@@ -1522,15 +1528,17 @@ client.on('messageCreate', async (message) => {
 
     await message.channel.sendTyping().catch(() => null);
 
-    if (!genAI && process.env.GEMINI_API_KEY) {
+    const apiKey = getCleanApiKey();
+
+    if (!genAI && apiKey) {
       try {
-        genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+        genAI = new GoogleGenerativeAI(apiKey);
       } catch (e) {
         console.error('Erro ao instanciar Gemini:', e);
       }
     }
 
-    if (!genAI) {
+    if (!apiKey) {
       await message.reply(
         '🤖 **IA Assistente (Dr. Renato):** A funcionalidade !ia está ativada para você! Para conectar com o modelo Gemini ao vivo, configure a variável `GEMINI_API_KEY` no seu arquivo `.env` ou Render.'
       ).catch(() => null);
@@ -1570,26 +1578,71 @@ client.on('messageCreate', async (message) => {
       'gemini-1.5-flash',
       'gemini-1.5-pro',
       'gemini-2.0-flash-exp',
+      'gemini-2.0-flash',
       'gemini-pro'
     ];
 
     let replyText = null;
     let lastError = null;
 
-    for (const modelName of modelCandidates) {
-      try {
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent(fullPrompt);
-        const response = await result.response;
-        const text = response.text();
-        if (text) {
-          replyText = text;
-          break;
+    // 1. Tentativa via SDK oficial GoogleGenerativeAI
+    if (genAI) {
+      for (const modelName of modelCandidates) {
+        try {
+          const model = genAI.getGenerativeModel({ model: modelName });
+          const result = await model.generateContent(fullPrompt);
+          const response = await result.response;
+          const text = response.text();
+          if (text) {
+            replyText = text;
+            break;
+          }
+        } catch (errModel) {
+          lastError = errModel;
+          console.warn(`[IA Gemini SDK] Modelo "${modelName}" indisponível:`, errModel?.message);
         }
-      } catch (errModel) {
-        lastError = errModel;
-        console.warn(`[IA Gemini] Modelo "${modelName}" indisponível:`, errModel?.message);
       }
+    }
+
+    // 2. Fallback direto via REST HTTP caso a SDK falhe/lance 404
+    if (!replyText && apiKey) {
+      const restModels = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp', 'gemini-2.0-flash', 'gemini-pro'];
+      for (const mName of restModels) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent?key=${apiKey}`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: fullPrompt }] }]
+            })
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const textCandidate = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (textCandidate) {
+              replyText = textCandidate;
+              break;
+            }
+          } else {
+            const errBody = await res.text();
+            console.warn(`[IA Gemini Direct REST] Modelo ${mName} retornou HTTP ${res.status}:`, errBody);
+            try {
+              const errJson = JSON.parse(errBody);
+              if (errJson?.error?.message) lastError = new Error(errJson.error.message);
+            } catch (e) {}
+          }
+        } catch (eRest) {
+          console.warn(`[IA Gemini Direct REST] Erro ao chamar ${mName}:`, eRest.message);
+        }
+      }
+    }
+
+    if (!replyText) {
+      console.error('Erro ao gerar resposta com Gemini em todos os modelos e endpoints REST:', lastError);
+      const errDetail = lastError?.message ? lastError.message.substring(0, 300) : 'Modelos indisponíveis';
+      await message.reply(`❌ **Erro ao processar a requisição da IA:** \`${errDetail}\`\nVerifique se a chave \`GEMINI_API_KEY\` no Render / .env foi criada no Google AI Studio (aistudio.google.com).`).catch(() => null);
+      return;
     }
 
     if (!replyText) {
