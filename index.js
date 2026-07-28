@@ -513,10 +513,21 @@ async function updateJuizesWorkload(guild) {
     reportContent += `-----------------------------------------\n` +
                      `*Este relatório é atualizado dinamicamente pelo Cartório Judicial a cada novo processo autuado.*`;
 
-    // Atualiza a mensagem no canal "Juízes"
-    const channelMsgs = await juizesChannel.messages.fetch({ limit: 20 }).catch(() => []);
+    // Atualiza a mensagem no canal "Juízes" (busca mensagens recentes e mensagens fixadas para evitar duplicações ao reiniciar)
+    const [channelMsgs, pinnedMsgs] = await Promise.all([
+      juizesChannel.messages.fetch({ limit: 50 }).catch(() => null),
+      juizesChannel.messages.fetchPinned().catch(() => null)
+    ]);
+
     const channelMsgsArray = safeGetArray(channelMsgs);
-    const botMsg = channelMsgsArray.find(m => m && m.author && m.author.id === client.user.id && m.content.includes('RELATÓRIO DE DISTRIBUIÇÃO'));
+    const pinnedMsgsArray = safeGetArray(pinnedMsgs);
+    const allMsgsMap = new Map();
+    [...pinnedMsgsArray, ...channelMsgsArray].forEach(m => {
+      if (m && m.id) allMsgsMap.set(m.id, m);
+    });
+    const allMsgs = Array.from(allMsgsMap.values());
+
+    const botMsg = allMsgs.find(m => m && m.author && m.author.id === client.user.id && m.content && m.content.includes('RELATÓRIO DE DISTRIBUIÇÃO'));
 
     // Cria as ActionRows dos botões para cada juiz cadastrado
     const rows = [];
@@ -550,7 +561,23 @@ async function updateJuizesWorkload(guild) {
     }
 
     // 2. Painel Fixado de Marcação de Audiências em #juízes
-    const botMsgAudiencias = channelMsgsArray.find(m => m && m.author && m.author.id === client.user.id && m.embeds && m.embeds[0] && m.embeds[0].title && m.embeds[0].title.includes('MARCAÇÃO DE AUDIÊNCIAS'));
+    // Encontra TODAS as mensagens do painel de audiências enviadas pelo bot (fixadas ou recentes)
+    const matchingAudienciaMsgs = allMsgs.filter(m => 
+      m && m.author && m.author.id === client.user.id && 
+      m.embeds && m.embeds[0] && m.embeds[0].title && 
+      m.embeds[0].title.includes('MARCAÇÃO') && m.embeds[0].title.includes('AUDIÊNCIAS')
+    );
+
+    // Se houver mais de uma mensagem duplicada gerada em reinicializações passadas, remove as duplicadas
+    let botMsgAudiencias = null;
+    if (matchingAudienciaMsgs.length > 0) {
+      botMsgAudiencias = matchingAudienciaMsgs[0];
+      if (matchingAudienciaMsgs.length > 1) {
+        for (let i = 1; i < matchingAudienciaMsgs.length; i++) {
+          await matchingAudienciaMsgs[i].delete().catch(() => null);
+        }
+      }
+    }
 
     const audienciasEmbed = new EmbedBuilder()
       .setTitle('⚖️ MARCAÇÃO E AGENDA DE AUDIÊNCIAS JUDICIAIS')
