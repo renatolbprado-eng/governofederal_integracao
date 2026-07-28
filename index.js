@@ -1537,10 +1537,39 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
+    // Suporte a mensagens respondidas (reply no Discord)
+    let referencedText = '';
+    if (message.reference && message.reference.messageId) {
+      try {
+        const refMsg = await message.channel.messages.fetch(message.reference.messageId).catch(() => null);
+        if (refMsg) {
+          if (refMsg.content) {
+            referencedText += `\n\n--- MENSAGEM / DECISÃO RESPONDIDA ---\n${refMsg.content}`;
+          }
+          if (refMsg.embeds && refMsg.embeds.length > 0) {
+            const embedTexts = refMsg.embeds.map(e => {
+              let t = '';
+              if (e.title) t += `[Título: ${e.title}]\n`;
+              if (e.description) t += `${e.description}\n`;
+              if (e.fields && e.fields.length > 0) {
+                t += e.fields.map(f => `• ${f.name}: ${f.value}`).join('\n');
+              }
+              return t;
+            }).join('\n\n');
+            referencedText += `\n\n--- CARD / EMBED DA DECISÃO RESPONDIDA ---\n${embedTexts}`;
+          }
+        }
+      } catch (err) {
+        console.error('Erro ao buscar mensagem respondida:', err);
+      }
+    }
+
+    const fullPrompt = prompt + referencedText;
+
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: prompt,
+        contents: fullPrompt,
       });
 
       const replyText = response.text || 'Não recebi uma resposta válida da IA.';
