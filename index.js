@@ -1579,76 +1579,17 @@ client.on('messageCreate', async (message) => {
 
     const systemInstruction = "Você é o assistente virtual jurídico do Dr. Renato. Responda DIRETAMENTE à solicitação ou pergunta do usuário. NUNCA exiba rascunhos, planos, interpretações de linguagem, opções de rascunho (Drafting), ou seu raciocínio interno (Chain of Thought). Entregue apenas a resposta final limpa e direta em português.";
 
-    // 1. Descoberta Dinâmica de Modelos Autorizados no Google AI Studio
-    try {
-      const listEndpoints = [
-        `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
-        `https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`
-      ];
+    // Prioriza o modelo gemini-1.5-flash / gemini-1.5-pro que NAO expõem o processo de raciocínio interno (Thinking/CoT)
+    const modelCandidates = [
+      'gemini-1.5-flash',
+      'gemini-1.5-pro',
+      'gemini-2.0-flash-lite',
+      'gemini-2.0-flash',
+      'gemini-pro'
+    ];
 
-      let discoveredModels = [];
-
-      for (const ep of listEndpoints) {
-        try {
-          const listRes = await fetch(ep, {
-            headers: {
-              'Content-Type': 'application/json',
-              'x-goog-api-key': apiKey
-            }
-          });
-
-          if (listRes.ok) {
-            const listData = await listRes.json();
-            if (listData && listData.models && Array.isArray(listData.models)) {
-              const valid = listData.models.filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'));
-              if (valid.length > 0) {
-                const isBeta = ep.includes('v1beta');
-                discoveredModels.push(...valid.map(m => ({
-                  rawName: m.name,
-                  cleanName: m.name.replace(/^models\//, ''),
-                  version: isBeta ? 'v1beta' : 'v1'
-                })));
-              }
-            }
-          }
-        } catch (eList) {}
-      }
-
-      // Se encontrou modelos dinâmicos autorizados para a chave, tenta a geração
-      if (discoveredModels.length > 0) {
-        for (const item of discoveredModels) {
-          try {
-            const targetUrl = `https://generativelanguage.googleapis.com/${item.version}/models/${item.cleanName}:generateContent`;
-            const genRes = await fetch(targetUrl, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'x-goog-api-key': apiKey
-              },
-              body: JSON.stringify({
-                system_instruction: { parts: [{ text: systemInstruction }] },
-                contents: [{ parts: [{ text: fullPrompt }] }]
-              })
-            });
-
-            if (genRes.ok) {
-              const genData = await genRes.json();
-              const txt = genData?.candidates?.[0]?.content?.parts?.[0]?.text;
-              if (txt) {
-                replyText = txt;
-                break;
-              }
-            }
-          } catch (eGen) {}
-        }
-      }
-    } catch (eDiscovery) {
-      console.warn('[IA Gemini Descoberta] Erro:', eDiscovery.message);
-    }
-
-    // 2. Fallback via SDK caso a descoberta dinamica nao tenha retornado texto
-    if (!replyText && genAI) {
-      const modelCandidates = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp', 'gemini-2.0-flash', 'gemini-pro'];
+    // 1. Tenta a geração via SDK oficial
+    if (genAI) {
       for (const modelName of modelCandidates) {
         try {
           const model = genAI.getGenerativeModel({ 
@@ -1668,6 +1609,35 @@ client.on('messageCreate', async (message) => {
       }
     }
 
+    // 2. Fallback via REST HTTP caso necessário
+    if (!replyText && apiKey) {
+      for (const mName of modelCandidates) {
+        try {
+          const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${mName}:generateContent`;
+          const genRes = await fetch(targetUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': apiKey
+            },
+            body: JSON.stringify({
+              system_instruction: { parts: [{ text: systemInstruction }] },
+              contents: [{ parts: [{ text: fullPrompt }] }]
+            })
+          });
+
+          if (genRes.ok) {
+            const genData = await genRes.json();
+            const txt = genData?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (txt) {
+              replyText = txt;
+              break;
+            }
+          }
+        } catch (eGen) {}
+      }
+    }
+
     if (!replyText) {
       console.error('Erro ao gerar resposta com Gemini:', lastError);
       const errDetail = lastError?.message ? lastError.message.substring(0, 300) : 'Nenhum modelo Gemini ativado para a chave';
@@ -1675,10 +1645,23 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // Limpeza de blocos de pensamento/raciocínio se o modelo vazar tags de CoT
+    // Algoritmo estrito de extração para descartar rascunhos ("Draft 1:", "Self-Correction:", "Constraint Checklist", etc.)
     let cleanReplyText = replyText;
+
+    // Se contiver padrões de raciocínio/thinking do Gemini 2.0 (Self-Correction, Constraint Checklist, Drafts)
+    if (cleanReplyText.includes('Constraint Checklist') || cleanReplyText.includes('Self-Correction') || cleanReplyText.includes('User input:')) {
+      // Extrai apenas o último bloco de texto entre aspas ou após o último trecho de Self-Correction
+      const quoteMatches = [...cleanReplyText.matchAll(/"([^"]{10,})"/g)];
+      if (quoteMatches.length > 0) {
+        cleanReplyText = quoteMatches[quoteMatches.length - 1][1];
+      } else {
+        const parts = cleanReplyText.split(/Self-Correction:|Draft \d+:|Standard professional response:/i);
+        cleanReplyText = parts[parts.length - 1].replace(/^[^\w\s\d"'\`]+/, '').trim();
+      }
+    }
+
     cleanReplyText = cleanReplyText.replace(/<thought>[\s\S]*?<\/thought>/gi, '');
-    cleanReplyText = cleanReplyText.replace(/Input:[\s\S]*?Drafting the response:?/gi, '');
+    cleanReplyText = cleanReplyText.replace(/^User input:[\s\S]*?Drafting the response:?/gi, '');
     cleanReplyText = cleanReplyText.trim();
 
     if (!cleanReplyText) cleanReplyText = replyText;
