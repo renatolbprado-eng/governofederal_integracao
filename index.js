@@ -1572,7 +1572,42 @@ client.on('messageCreate', async (message) => {
       }
     }
 
-    const fullPrompt = prompt + referencedText;
+    // Coleta automaticamente o histórico recente de mensagens do canal ou thread (até 35 mensagens)
+    let channelHistoryText = '';
+    try {
+      const recentMsgs = await message.channel.messages.fetch({ limit: 35 }).catch(() => null);
+      if (recentMsgs && recentMsgs.size > 0) {
+        const msgsArr = safeGetArray(recentMsgs)
+          .filter(m => m && m.id !== message.id) // ignora a mensagem atual do comando !ia
+          .sort((a, b) => a.createdTimestamp - b.createdTimestamp); // ordena da mais antiga para a mais recente
+
+        const formattedMsgs = msgsArr.map(m => {
+          const authorName = m.author ? (m.author.username || m.author.tag) : 'Usuário';
+          let body = m.content || '';
+          if (m.embeds && m.embeds.length > 0) {
+            const embedContent = m.embeds.map(e => {
+              let t = '';
+              if (e.title) t += `[${e.title}] `;
+              if (e.description) t += `${e.description} `;
+              if (e.fields && e.fields.length > 0) {
+                t += e.fields.map(f => `${f.name}: ${f.value}`).join(' | ');
+              }
+              return t;
+            }).join(' ');
+            body += ` ${embedContent}`;
+          }
+          return body.trim() ? `• [${authorName}]: ${body.substring(0, 500)}` : null;
+        }).filter(Boolean);
+
+        if (formattedMsgs.length > 0) {
+          channelHistoryText = `\n\n--- HISTÓRICO DE MENSAGENS E PROCESSOS RECENTES DO CANAL/THREAD ---\n` + formattedMsgs.join('\n');
+        }
+      }
+    } catch (errHistory) {
+      console.warn('Erro ao buscar histórico recente para IA:', errHistory);
+    }
+
+    const fullPrompt = prompt + referencedText + channelHistoryText;
 
     let replyText = null;
     let lastError = null;
