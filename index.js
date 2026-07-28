@@ -1567,10 +1567,19 @@ client.on('messageCreate', async (message) => {
     const fullPrompt = prompt + referencedText;
 
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: fullPrompt,
-      });
+      let response;
+      try {
+        response = await ai.models.generateContent({
+          model: 'gemini-2.0-flash',
+          contents: fullPrompt,
+        });
+      } catch (err20) {
+        console.warn('Fallback para gemini-1.5-flash devido a erro:', err20?.message);
+        response = await ai.models.generateContent({
+          model: 'gemini-1.5-flash',
+          contents: fullPrompt,
+        });
+      }
 
       const replyText = response.text || 'Não recebi uma resposta válida da IA.';
       if (replyText.length <= 1900) {
@@ -1587,7 +1596,8 @@ client.on('messageCreate', async (message) => {
       }
     } catch (err) {
       console.error('Erro ao gerar resposta com Gemini:', err);
-      await message.reply('❌ **Erro ao processar a requisição da IA.** Verifique se a chave GEMINI_API_KEY no `.env` está correta.').catch(() => null);
+      const errDetail = err?.message ? err.message.substring(0, 300) : 'Erro de conexão/autenticação';
+      await message.reply(`❌ **Erro ao processar a requisição da IA:** \`${errDetail}\`\nVerifique as variáveis de ambiente no Render / .env.`).catch(() => null);
     }
     return;
   }
