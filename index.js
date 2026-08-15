@@ -1522,8 +1522,8 @@ client.on('messageCreate', async (message) => {
 
   // --- COMANDOS DA CORREGEDORIA ---
 
-  // Comando !setup-denuncia
-  if (contentLower === '!setup-denuncia') {
+  // Comando !setup-denuncia-corregedoria (Antigo Corregedoria)
+  if (contentLower === '!setup-denuncia-corregedoria' || contentLower === '!setup-denuncia-crrgd') {
     await deleteCommandMessage();
     const embed = new EmbedBuilder()
       .setTitle('⚖️ CORREGEDORIA GERAL - CANAL DE DENÚNCIAS')
