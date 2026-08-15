@@ -1,0 +1,7 @@
+node_modules/
+.env
+plataforma_local/.env
+plataforma_local/node_modules/
+plataforma_local/mingit/
+*.log
+banco_entendimentos_tribunal.json

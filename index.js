@@ -46,6 +46,9 @@ const pendingManualRoleInput = new Map();
 // Cache de respostas privadas da IA (!ia privada)
 const privateIaResponses = new Map();
 
+// Controle de suspensão temporária de 1h para uso da IA fora do contexto do RP
+const iaBannedUsers = new Map();
+
 // --- CONSTANTES E MAPAS DA CORREGEDORIA & TRIANGULAÇÃO ---
 const ROLE_CORREGEDORIA_NOME = '「CRRGD」・ Corregedoria Geral';
 const ROLE_CORP_NOME = '「CORP」Membro De Corporação';
@@ -115,6 +118,302 @@ function isImageUrl(url, contentType = '') {
          cleanUrl.endsWith('.gif') ||
          cleanUrl.endsWith('.webp') ||
          cleanUrl.endsWith('.bmp');
+}
+
+// Função auxiliar para dividir textos longos preservando palavras e quebras de linha completas
+function splitTextPreservingWords(text, maxLength = 1600) {
+  if (!text || text.length <= maxLength) return [text];
+
+  const chunks = [];
+  let currentChunk = '';
+  const lines = text.split('\n');
+
+  for (const line of lines) {
+    if ((currentChunk + '\n' + line).length <= maxLength) {
+      currentChunk += (currentChunk ? '\n' : '') + line;
+    } else {
+      if (currentChunk) {
+        chunks.push(currentChunk);
+        currentChunk = '';
+      }
+
+      if (line.length > maxLength) {
+        const words = line.split(' ');
+        for (const word of words) {
+          if ((currentChunk + ' ' + word).length <= maxLength) {
+            currentChunk += (currentChunk ? ' ' : '') + word;
+          } else {
+            if (currentChunk) chunks.push(currentChunk);
+            currentChunk = word;
+          }
+        }
+      } else {
+        currentChunk = line;
+      }
+    }
+  }
+
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
+}
+
+// --- BASE DE CONHECIMENTO DINÂMICA: ENTENDIMENTOS DO TRIBUNAL (INDEXAÇÃO DE ALTA PERFORMANCE) ---
+const KNOWLEDGE_BASE_PATH = path.resolve('banco_entendimentos_tribunal.json');
+let tribunalEntendimentosCache = '';
+let lastEntendimentosFetch = 0;
+
+// Busca TODAS as mensagens do canal navegando pelas páginas da API do Discord
+async function fetchAllChannelMessages(channel, limit = 500) {
+  let allMessages = [];
+  let lastId = null;
+
+  while (allMessages.length < limit) {
+    const options = { limit: 100 };
+    if (lastId) options.before = lastId;
+
+    const msgs = await channel.messages.fetch(options).catch(() => null);
+    if (!msgs || msgs.size === 0) break;
+
+    const msgsArray = safeGetArray(msgs);
+    allMessages = allMessages.concat(msgsArray);
+    lastId = msgsArray[msgsArray.length - 1].id;
+
+    if (msgs.size < 100) break;
+  }
+
+  return allMessages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+}
+
+async function getEntendimentosTribunalContext(guild, query = '') {
+  if (!guild) return '';
+  const now = Date.now();
+
+  // 1. Tenta carregar do cache em disco se a memória estiver vazia
+  if (!tribunalEntendimentosCache && fs.existsSync(KNOWLEDGE_BASE_PATH)) {
+    try {
+      const fileData = JSON.parse(fs.readFileSync(KNOWLEDGE_BASE_PATH, 'utf8'));
+      if (fileData && fileData.text) {
+        tribunalEntendimentosCache = fileData.text;
+        lastEntendimentosFetch = fileData.timestamp || 0;
+      }
+    } catch (e) {}
+  }
+
+  // 2. Re-indexa todas as mensagens do canal no Discord a cada 30 minutos (1.800.000 ms)
+  if (!tribunalEntendimentosCache || (now - lastEntendimentosFetch > 1800000)) {
+    try {
+      const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
+      const channelsArray = safeGetArray(channels);
+      const targetChannel = channelsArray.find(c => 
+        c && c.isTextBased() && (
+          matchChannel(c.name, 'entendimentos-do-tribunal') ||
+          matchChannel(c.name, 'entendimentos')
+        )
+      );
+
+      if (targetChannel) {
+        const sortedMsgs = await fetchAllChannelMessages(targetChannel, 500);
+
+        const textList = sortedMsgs.map(m => {
+          let body = m.content || '';
+          if (m.embeds && m.embeds.length > 0) {
+            const embedContent = m.embeds.map(e => {
+              let t = '';
+              if (e.title) t += `[${e.title}] `;
+              if (e.description) t += `${e.description} `;
+              if (e.fields && e.fields.length > 0) {
+                t += e.fields.map(f => `${f.name}: ${f.value}`).join(' | ');
+              }
+              return t;
+            }).join(' ');
+            body += ` ${embedContent}`;
+          }
+          return body.trim() ? `• ${body.trim()}` : null;
+        }).filter(Boolean);
+
+        if (textList.length > 0) {
+          tribunalEntendimentosCache = textList.join('\n');
+          lastEntendimentosFetch = now;
+
+          // Gravação permanente em arquivo JSON para respostas instantâneas
+          try {
+            fs.writeFileSync(KNOWLEDGE_BASE_PATH, JSON.stringify({
+              timestamp: now,
+              count: textList.length,
+              text: tribunalEntendimentosCache
+            }, null, 2), 'utf8');
+          } catch (errWrite) {}
+        }
+      }
+    } catch (err) {
+      console.warn('Erro ao indexar entendimentos do tribunal:', err);
+    }
+  }
+
+  if (!tribunalEntendimentosCache) return '';
+
+  // 3. FILTRO INTELIGENTE DE RELEVÂNCIA (Economia Máxima de Tokens)
+  // Se o usuário fez uma pergunta com palavras-chave, injeta preferencialmente os entendimentos correspondentes
+  if (query && query.length > 3) {
+    const terms = query.toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .split(/\s+/)
+      .filter(t => t.length > 3 && !['qual', 'quais', 'como', 'sobre', 'para', 'onde', 'quem'].includes(t));
+
+    if (terms.length > 0) {
+      const lines = tribunalEntendimentosCache.split('\n');
+      const matchedLines = lines.filter(line => {
+        const lineLow = line.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        return terms.some(term => lineLow.includes(term));
+      });
+
+      if (matchedLines.length > 0) {
+        return `\n\n--- ENTENDIMENTOS DO TRIBUNAL DIRETA MENTE RELEVANTES PARA A CONSULTA ---\n` + matchedLines.join('\n');
+      }
+    }
+  }
+
+  // 4. Se for consulta geral, envia a síntese tratada com limite seguro de caracteres
+  const safeText = tribunalEntendimentosCache.length > 5000 
+    ? tribunalEntendimentosCache.substring(0, 5000) + '\n[... Base de entendimentos sintetizada ...]' 
+    : tribunalEntendimentosCache;
+
+  return `\n\n--- BASE DE CONHECIMENTO & ENTENDIMENTOS OFICIAIS DO TRIBUNAL DE JUSTIÇA ---\n${safeText}`;
+}
+
+// --- SISTEMA DE REGISTRO DE EMPRESAS E ESCRITÓRIOS (CARTÓRIO & OAB - CNPJ ÚNICO AUTOMÁTICO) ---
+const registeredCNPJs = new Set();
+
+function generateUniqueCNPJ() {
+  let cnpj = '';
+  do {
+    const r = (n) => Math.floor(Math.random() * n);
+    const n1 = r(9), n2 = r(9), n3 = r(9);
+    const n4 = r(9), n5 = r(9), n6 = r(9);
+    const n7 = r(9), n8 = r(9);
+    const d1 = r(9), d2 = r(9);
+    cnpj = `${n1}${n2}.${n3}${n4}${n5}.${n6}${n7}${n8}/0001-${d1}${d2}`;
+  } while (registeredCNPJs.has(cnpj));
+
+  registeredCNPJs.add(cnpj);
+  return cnpj;
+}
+
+async function checkAndAssignEntityCNPJ(thread, isLawOffice = false) {
+  if (!thread || !thread.isThread()) return;
+  // Ignora posts de MODELO fixados ou criados como template
+  if (thread.name && thread.name.toUpperCase().includes('MODELO')) return;
+
+  try {
+    const msgs = await thread.messages.fetch({ limit: 50 }).catch(() => null);
+    if (!msgs) return;
+
+    const msgsArray = safeGetArray(msgs);
+
+    // Verifica se QUALQUER mensagem da thread já possui CNPJ atribuído e registra no Set de controle
+    let existingCNPJ = null;
+    msgsArray.forEach(m => {
+      const text = (m.content || '').toUpperCase();
+      const match = text.match(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/);
+      if (match) {
+        existingCNPJ = match[0];
+        registeredCNPJs.add(existingCNPJ);
+      }
+      if (m.embeds && m.embeds.length > 0) {
+        const fullEmb = JSON.stringify(m.embeds).toUpperCase();
+        const matchEmb = fullEmb.match(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/);
+        if (matchEmb) {
+          existingCNPJ = matchEmb[0];
+          registeredCNPJs.add(existingCNPJ);
+        }
+      }
+    });
+
+    if (existingCNPJ) {
+      // Já possui CNPJ designado: devidamente mantido e registrado no controle de unicidade
+      return;
+    }
+
+    // Não possui CNPJ: gera um novo CNPJ estritamente ÚNICO
+    const ownerId = thread.ownerId || (msgsArray.length > 0 ? msgsArray[0].author.id : null);
+    const ownerMention = ownerId ? `<@${ownerId}>` : 'Requerente';
+    const newCNPJ = generateUniqueCNPJ();
+    const timeStamp = getFormattedDateTime();
+
+    const titleText = isLawOffice 
+      ? `🏛️ **REGISTRO DE ESCRITÓRIOS DE ADVOCACIA - OAB & CARTÓRIO**\n*Averbação e Constituição de Sociedade de Advogados*`
+      : `🏛️ **CARTÓRIO REGISTRO DE EMPRESAS**\n*Averbação e Constituição de Pessoa Jurídica*`;
+
+    const descriptionText = isLawOffice
+      ? `Certificamos que a presente sociedade/escritório de advocacia foi devidamente registrada e averbada junto à Ordem dos Advogados e ao Cartório do Governo Federal.`
+      : `Certificamos que a presente instituição/empresa foi devidamente registrada e averbada junto ao Cartório do Governo Federal.`;
+
+    const certidaoMsg = 
+      `-----------------------------------------\n` +
+      `${titleText}\n\n` +
+      `> **Titular / Requerente:** ${ownerMention}\n` +
+      `> **CNPJ Designado:** \`${newCNPJ}\`\n` +
+      `> **Data de Registro:** ${timeStamp}\n\n` +
+      `${descriptionText}\n` +
+      `-----------------------------------------`;
+
+    await thread.send({ content: certidaoMsg }).catch(() => null);
+    console.log(`[Cartório CNPJ] CNPJ Único ${newCNPJ} atribuído a "${thread.name}" (${thread.id}) [Escritório: ${isLawOffice}]`);
+  } catch (err) {
+    console.error(`[Cartório CNPJ] Erro ao verificar/atribuir CNPJ para thread ${thread.id}:`, err);
+  }
+}
+
+async function auditAndRegisterCompaniesAndLawOffices(guild) {
+  if (!guild) return;
+  try {
+    const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
+    const channelsArray = safeGetArray(channels);
+
+    // 1. Canal Registro de Empresas
+    const empChannel = channelsArray.find(c => 
+      c && (
+        matchChannel(c.name, 'registro-de-empresas') ||
+        matchChannel(c.name, 'empresas')
+      )
+    );
+
+    // 2. Canal Escritórios de Advocacia (OAB)
+    const officeChannel = channelsArray.find(c => 
+      c && (
+        matchChannel(c.name, 'escritorios') ||
+        matchChannel(c.name, 'escritórios')
+      )
+    );
+
+    const targetChannels = [
+      { channel: empChannel, isLawOffice: false },
+      { channel: officeChannel, isLawOffice: true }
+    ];
+
+    for (const item of targetChannels) {
+      if (item.channel && item.channel.threads) {
+        const activeThreads = await item.channel.threads.fetchActive().catch(() => null);
+        if (activeThreads && activeThreads.threads) {
+          for (const [id, thread] of activeThreads.threads) {
+            await checkAndAssignEntityCNPJ(thread, item.isLawOffice);
+          }
+        }
+
+        const archivedThreads = await item.channel.threads.fetchArchived().catch(() => null);
+        if (archivedThreads && archivedThreads.threads) {
+          for (const [id, thread] of archivedThreads.threads) {
+            await checkAndAssignEntityCNPJ(thread, item.isLawOffice);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Cartório CNPJ] Erro na auditoria de empresas e escritórios no servidor:', err);
+  }
 }
 
 async function publishRepercussaoAnnouncement(guild, channel, conteudo, attachments = [], textNotes = '') {
@@ -821,13 +1120,7 @@ async function initializeManualDeUso(guild) {
           name: '📝 Peticionamento Eletrônico', 
           value: `• **Onde:** Canal \`#peticionamento-eletrônico\`.\n` +
                  `• **Quem pode usar:** Qualquer Advogado/Procurador.\n` +
-                 `• **Como funciona:** Clique no botão **"Peticionar"**. Preencha o Modal com o *Tipo de Processo*, *Autor*, *Réu* e a *Petição Inicial (Fatos)*. O bot criará uma thread privativa e solicitará a menção dos Discords \`(ex: @pessoa1)\` e o upload de anexos/provas.`
-        },
-        { 
-          name: '👥 Habilitação de Procuradores (!adv)', 
-          value: `• **Onde:** Dentro da thread (sala) do processo autuado.\n` +
-                 `• **Quem pode usar:** Advogados das partes.\n` +
-                 `• **Como funciona:** Digite \`!adv\` no chat do processo. Selecione se é Advogado do Autor ou do Réu no botão e mencione o Discord dos advogados \`(ex: @adv1 @adv2)\`. O bot cadastrará os advogados na autuação e emitirá o **Ato Ordinatório de Procuradores**.`
+                 `• **Como funciona:** Clique no botão **"Peticionar"**. Preencha o Modal com o *Tipo de Processo*, *Parte Autora* e *Parte Ré*. O bot criará a thread do processo automaticamente no fórum e notificará as partes.`
         },
         { 
           name: '🤝 Audiência de Despacho', 
@@ -980,10 +1273,15 @@ client.once('ready', async () => {
   console.log(`=========================================\n`);
   
   try {
-    const guilds = await client.guilds.fetch();
-    for (const [guildId] of guilds) {
-      const guild = await client.guilds.fetch(guildId);
-      
+    const targetGuildId = process.env.GUILD_ID || '1142251068890304522';
+    let guild = null;
+    try {
+      guild = await client.guilds.fetch(targetGuildId);
+    } catch (e) {
+      guild = client.guilds.cache.first();
+    }
+
+    if (guild) {
       console.log(`⚙️  Inicializando serviços para o servidor: ${guild.name}`);
       const logs = [];
 
@@ -1019,6 +1317,68 @@ client.once('ready', async () => {
       } catch (e) {
         logs.push(`  ├─ ❌ [Manual de Uso] Falha na inicialização: ${e.message}`);
       }
+
+      // 5. Módulo Arquivo de Processos (Restrição para Juízes)
+      try {
+        await ensureArchiveChannelPermissions(guild);
+        logs.push(`  ├─ 📁 [Arquivo-Processos] Permissões restringidas exclusivamente a Juízes de Direito.`);
+      } catch (e) {
+        logs.push(`  ├─ ❌ [Arquivo-Processos] Falha na restrição de permissões: ${e.message}`);
+      }
+
+      // 6. Módulo Gestão de Permissões (#moderator-only)
+      try {
+        await initializeGestaoPermissoes(guild);
+        logs.push(`  ├─ 🛡️ [Gestão-Permissões] Painel de Controle de Acessos verificado/atualizado.`);
+      } catch (e) {
+        logs.push(`  ├─ ❌ [Gestão-Permissões] Falha na inicialização: ${e.message}`);
+      }
+
+      // 7. Módulo Cartório Registro de Empresas & Escritórios de Advocacia (CNPJs Únicos)
+      try {
+        await auditAndRegisterCompaniesAndLawOffices(guild);
+        logs.push(`  └─ 🏛️ [Cartório & OAB] Auditoria de empresas e escritórios concluída e CNPJs verificados.`);
+      } catch (e) {
+        logs.push(`  └─ ❌ [Cartório & OAB] Falha na auditoria de CNPJs: ${e.message}`);
+      }
+
+      console.log(logs.join('\n'));
+      console.log(`\n=========================================\n`);
+    }
+  } catch (err) {
+    console.error('Erro na inicialização do servidor:', err);
+  }
+});
+
+// EVENTO THREADCREATE: AGENDAMENTO AUTOMÁTICO DE CNPJ DE 5 MINUTOS PARA EMPRESAS E ESCRITÓRIOS
+client.on('threadCreate', async (thread) => {
+  try {
+    if (!thread || !thread.name) return;
+    // Ignora posts de MODELO
+    if (thread.name.toUpperCase().includes('MODELO')) return;
+    const parentChannel = thread.parent || (thread.parentId ? await thread.guild?.channels.fetch(thread.parentId).catch(() => null) : null);
+    const channelName = parentChannel ? parentChannel.name.toLowerCase() : thread.name.toLowerCase();
+
+    const isEmpresas = matchChannel(channelName, 'registro-de-empresas') || matchChannel(channelName, 'empresas');
+    const isEscritorios = matchChannel(channelName, 'escritorios') || matchChannel(channelName, 'escritórios');
+
+    if (isEmpresas || isEscritorios) {
+      console.log(`[Cartório/OAB CNPJ] Novo registro detectado em "${channelName}": "${thread.name}". CNPJ será agendado em 5 minutos.`);
+      setTimeout(async () => {
+        try {
+          const freshThread = await thread.guild.channels.fetch(thread.id).catch(() => null);
+          if (freshThread) {
+            await checkAndAssignEntityCNPJ(freshThread, isEscritorios);
+          }
+        } catch (e) {
+          console.error('[Cartório/OAB CNPJ] Erro no processamento agendado de CNPJ:', e);
+        }
+      }, 300000);
+    }
+  } catch (err) {
+    console.error('[Cartório/OAB CNPJ] Erro ao escutar threadCreate:', err);
+  }
+});
 
 // MÓDULO DE GESTÃO INSTITUCIONAL DE PERMISSÕES & ACESSOS (#moderator-only)
 async function initializeGestaoPermissoes(guild) {
@@ -1078,31 +1438,6 @@ async function initializeGestaoPermissoes(guild) {
     console.error('[Gestão Permissões] Erro ao inicializar painel de gestão:', err);
   }
 }
-
-      // 5. Módulo Arquivo de Processos (Restrição para Juízes)
-      try {
-        await ensureArchiveChannelPermissions(guild);
-        logs.push(`  ├─ 📁 [Arquivo-Processos] Permissões restringidas exclusivamente a Juízes de Direito.`);
-      } catch (e) {
-        logs.push(`  ├─ ❌ [Arquivo-Processos] Falha na restrição de permissões: ${e.message}`);
-      }
-
-      // 6. Módulo Gestão de Permissões (#moderator-only)
-      try {
-        await initializeGestaoPermissoes(guild);
-        logs.push(`  └─ 🛡️ [Gestão-Permissões] Painel de Controle de Acessos verificado/atualizado.`);
-      } catch (e) {
-        logs.push(`  └─ ❌ [Gestão-Permissões] Falha na inicialização: ${e.message}`);
-      }
-
-      // Imprime logs agrupados de canais
-      logs.forEach(log => console.log(log));
-      console.log(`=========================================\n`);
-    }
-  } catch (err) {
-    console.error('❌ Erro no startup:', err);
-  }
-});
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
@@ -1533,7 +1868,65 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // COMANDO !IA ou !GEMINI (Ativo exclusivamente para o Dr. Renato)
+  // COMANDO !SETUP-DENUNCIA ou !ANEXAR-BOTAO-DENUNCIA
+  if (content.toLowerCase().startsWith('!setup-denuncia') || content.toLowerCase().startsWith('!anexar-botao-denuncia')) {
+    try {
+      const channels = await message.guild.channels.fetch().catch(() => message.guild.channels.cache);
+      const channelsArray = safeGetArray(channels);
+      const targetChannel = channelsArray.find(c => 
+        c && c.isTextBased() && (
+          matchChannel(c.name, 'fazer-denuncia') ||
+          matchChannel(c.name, 'fazer-denúncia') ||
+          matchChannel(c.name, 'denuncia') ||
+          matchChannel(c.name, 'denúncias')
+        )
+      ) || message.channel;
+
+      const fetchedMsgs = await targetChannel.messages.fetch({ limit: 30 }).catch(() => null);
+      const msgsArray = fetchedMsgs ? safeGetArray(fetchedMsgs) : [];
+      const pinnedMsgs = await targetChannel.messages.fetchPinned().catch(() => null);
+      const pinnedArray = pinnedMsgs ? safeGetArray(pinnedMsgs) : [];
+
+      const allMsgs = [...pinnedArray, ...msgsArray];
+      const embedMsg = allMsgs.find(m => m.embeds && m.embeds.length > 0) || msgsArray[0];
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_abrir_ticket_denuncia')
+          .setLabel('🚨 Fazer Denúncia')
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      if (embedMsg && embedMsg.author.id === client.user.id) {
+        await embedMsg.edit({ components: [row] });
+        await message.reply(`✅ **Sucesso!** O botão **🚨 Fazer Denúncia** foi anexado à mensagem fixada/existente no canal <#${targetChannel.id}>.`).catch(() => null);
+      } else if (embedMsg) {
+        await targetChannel.send({
+          content: `🚨 **ATENDIMENTO E RECEPTÁCULO DE DENÚNCIA - MINISTÉRIO PÚBLICO**\nClique no botão abaixo para abrir uma denúncia privada diretamente com os Promotores de Justiça:`,
+          components: [row]
+        });
+        await message.reply(`✅ **Sucesso!** O botão **🚨 Fazer Denúncia** foi enviado no canal <#${targetChannel.id}>.`).catch(() => null);
+      } else {
+        const defaultEmbed = new EmbedBuilder()
+          .setTitle('🚨 MINISTÉRIO PÚBLICO - CANAL DE DENÚNCIAS')
+          .setDescription(
+            `Bem-vindo ao canal oficial de denúncias do **Governo Federal e Poder Judiciário**.\n\n` +
+            `Clique no botão **🚨 Fazer Denúncia** abaixo para abrir um atendimento estritamente confidencial diretamente com os **Promotores de Justiça**.`
+          )
+          .setColor(0xc0392b)
+          .setFooter({ text: 'Ministério Público • Governo Federal' });
+
+        await targetChannel.send({ embeds: [defaultEmbed], components: [row] });
+        await message.reply(`✅ **Sucesso!** O painel de denúncia com o botão foi publicado no canal <#${targetChannel.id}>.`).catch(() => null);
+      }
+    } catch (errSetup) {
+      console.error('[Denúncia Setup] Erro ao configurar botão de denúncia:', errSetup);
+      await message.reply('❌ Ocorreu um erro ao configurar o botão de denúncia. Verifique os logs.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !IA ou !GEMINI
   if (content.toLowerCase().startsWith('!ia') || content.toLowerCase().startsWith('!gemini')) {
     const authorTag = message.author.tag ? message.author.tag.toLowerCase() : '';
     const usernameLower = message.author.username.toLowerCase();
@@ -1545,9 +1938,15 @@ client.on('messageCreate', async (message) => {
                        displayNameLower.includes('dr.renato') ||
                        authorTag.includes('renat');
 
+    // Se NÃO for o Dr. Renato, verifica se o usuário está suspenso temporariamente por 1h
     if (!isDrRenato) {
-      await message.reply('⚠️ **Acesso Negado:** O comando de Inteligência Artificial (!ia) é de uso exclusivo do **Dr. Renato**.').catch(() => null);
-      return;
+      const banExpiry = iaBannedUsers.get(message.author.id);
+      if (banExpiry && banExpiry > Date.now()) {
+        const remainingMs = banExpiry - Date.now();
+        const remainingMins = Math.ceil(remainingMs / 60000);
+        await message.reply(`⚠️ **Acesso Suspenso:** Seu acesso ao comando \`!ia\` está temporariamente bloqueado por mais **${remainingMins} minuto(s)** devido a solicitações fora do contexto de RP/Judiciário.`).catch(() => null);
+        return;
+      }
     }
 
     const prompt = content.replace(/^!(ia|gemini)/i, '').trim();
@@ -1558,7 +1957,7 @@ client.on('messageCreate', async (message) => {
 
     const promptLower = prompt.toLowerCase();
 
-    // 1. Verificação ESTRITA de pedido de exclusão de mensagens
+    // 1. Verificação ESTRITA de pedido de exclusão de mensagens (Exclusivo do Dr. Renato)
     const hasDeleteIntent = (promptLower.includes('apague') || 
                              promptLower.includes('delete') || 
                              promptLower.includes('limpe') || 
@@ -1568,6 +1967,11 @@ client.on('messageCreate', async (message) => {
                             (promptLower.includes('mensagem') || promptLower.includes('mensagens') || promptLower.includes('chat') || promptLower.includes('historico') || promptLower.includes('histórico'));
 
     if (hasDeleteIntent) {
+      if (!isDrRenato) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas o Dr. Renato possui permissão para solicitar exclusão de mensagens via IA.').catch(() => null);
+        return;
+      }
+
       const numberMatch = promptLower.match(/(\d+)/);
       let count = numberMatch ? parseInt(numberMatch[1], 10) : 1;
       if (isNaN(count) || count < 1) count = 1;
@@ -1615,7 +2019,7 @@ client.on('messageCreate', async (message) => {
 
     if (!apiKey) {
       await message.reply(
-        '🤖 **IA Assistente (Dr. Renato):** A funcionalidade !ia está ativada para você! Para conectar com o modelo Gemini ao vivo, configure a variável `GEMINI_API_KEY` no seu arquivo `.env` ou Render.'
+        '🤖 **IA Assistente:** Para conectar com o modelo Gemini ao vivo, configure a variável `GEMINI_API_KEY` no seu arquivo `.env` ou Render.'
       ).catch(() => null);
       return;
     }
@@ -1653,8 +2057,8 @@ client.on('messageCreate', async (message) => {
       const recentMsgs = await message.channel.messages.fetch({ limit: 35 }).catch(() => null);
       if (recentMsgs && recentMsgs.size > 0) {
         const msgsArr = safeGetArray(recentMsgs)
-          .filter(m => m && m.id !== message.id) // ignora a mensagem atual do comando !ia
-          .sort((a, b) => a.createdTimestamp - b.createdTimestamp); // ordena da mais antiga para a mais recente
+          .filter(m => m && m.id !== message.id)
+          .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 
         const formattedMsgs = msgsArr.map(m => {
           const authorName = m.author ? (m.author.username || m.author.tag) : 'Usuário';
@@ -1682,22 +2086,27 @@ client.on('messageCreate', async (message) => {
       console.warn('Erro ao buscar histórico recente para IA:', errHistory);
     }
 
-    const fullPrompt = prompt + referencedText + channelHistoryText;
+    // Coleta a Base de Conhecimento dinâmica do canal ⚖️・entendimentos-do-tribunal
+    let entendimentosContext = '';
+    if (message.guild) {
+      entendimentosContext = await getEntendimentosTribunalContext(message.guild, prompt);
+    }
+
+    const fullPrompt = prompt + referencedText + channelHistoryText + entendimentosContext;
 
     let replyText = null;
     let lastError = null;
 
-    const systemInstruction = "Você é o assistente virtual jurídico do Dr. Renato. Responda DIRETAMENTE à solicitação ou pergunta do usuário. NUNCA exiba rascunhos, planos, interpretações de linguagem, opções de rascunho (Drafting), ou seu raciocínio interno (Chain of Thought). Entregue apenas a resposta final limpa e direta em português.";
+    // Instruções diferenciadas conforme a autoridade do usuário
+    const systemInstruction = isDrRenato
+      ? "Você é o assistente virtual jurídico do Dr. Renato. Responda de forma AMPLA, COMPLETA, DETALHADA E IRRESTRITA à solicitação ou pergunta do usuário, utilizando e fundamentando sua resposta nos entendimentos e jurisprudências oficiais do Tribunal de Justiça sempre que aplicável. NUNCA exiba rascunhos, planos, ou raciocínio interno. Entregue apenas a resposta final limpa e direta em português."
+      : "Você é o assistente virtual do Poder Judiciário / Governo RP. Suas respostas devem ser EXCLUSIVAMENTE focadas em assuntos relacionados a Roleplay (RP), Governo, Processos Judiciais, Direito ou Atuação no Servidor, devendo ser fundamentadas nos entendimentos e jurisprudências oficiais do Tribunal de Justiça sempre que aplicável. Responda de forma DENSA, DIRETA E BEM ESTRUTURADA, sem rodeios ou repetições desnecessárias, de modo que toda a explicação caiba perfeitamente em no máximo 1 ou 2 blocos de mensagem (~2.500 a 3.000 caracteres no total). ATENÇÃO CRÍTICA: Se a pergunta ou assunto do usuário NÃO tiver qualquer relação com Roleplay, Governo, Direito, Justiça ou o contexto do servidor (por exemplo: dúvidas escolares/acadêmicas fora do RP, tarefas de matemática, código de programação genérico, notícias do mundo real sem relação com o jogo), responda EXATAMENTE E APENAS O TEXTO: [FORA_DO_RP]. NUNCA responda perguntas fora do universo do RP/Judiciário para este perfil.";
 
-    // Prioriza o modelo gemini-1.5-flash / gemini-1.5-pro que NAO expõem o processo de raciocínio interno (Thinking/CoT)
+    // Modelos ativos e operacionais no Google AI Studio
     const modelCandidates = [
-      'gemini-flash-latest',
-      'gemini-2.5-flash',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-      'gemini-2.5-pro',
-      'gemini-1.5-pro',
-      'gemini-2.0-flash-lite'
+      'gemini-3.5-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-flash-latest'
     ];
 
     // 1. Tenta a geração via SDK oficial
@@ -1753,11 +2162,11 @@ client.on('messageCreate', async (message) => {
     if (!replyText) {
       console.error('Erro ao gerar resposta com Gemini:', lastError);
       const errDetail = lastError?.message ? lastError.message.substring(0, 300) : 'Nenhum modelo Gemini ativado para a chave';
-      await message.reply(`❌ **Erro ao processar a requisição da IA:** \`${errDetail}\`\nVerifique se a API do Gemini está ativada no Google AI Studio (aistudio.google.com).`).catch(() => null);
+      await message.reply(`❌ **Erro ao processar a requisição da IA:** \`${errDetail}\``).catch(() => null);
       return;
     }
 
-    // Algoritmo estrito de extração para descartar rascunhos ("Draft 1:", "Self-Correction:", "Constraint Checklist", etc.)
+    // Algoritmo estrito de extração para descartar rascunhos ("Draft 1:", "Self-Correction:", etc.)
     let cleanReplyText = replyText;
 
     if (cleanReplyText.includes('Constraint Checklist') || cleanReplyText.includes('Self-Correction') || cleanReplyText.includes('User input:')) {
@@ -1776,6 +2185,14 @@ client.on('messageCreate', async (message) => {
 
     if (!cleanReplyText) cleanReplyText = replyText;
 
+    // Detecta se a IA marcou o uso como desrelacionado ao RP para aplicar bloqueio de 1 hora
+    if (!isDrRenato && cleanReplyText.includes('[FORA_DO_RP]')) {
+      const oneHourMs = 60 * 60 * 1000;
+      iaBannedUsers.set(message.author.id, Date.now() + oneHourMs);
+      await message.reply('⚠️ **Acesso Suspenso:** O uso do comando `!ia` é restrito exclusivamente ao contexto do RP, Governo e Sistema Judiciário. Foi detectada uma solicitação não relacionada ao RP. Seu acesso ao comando `!ia` foi bloqueado pelo período de **1 hora**.').catch(() => null);
+      return;
+    }
+
     // Envio Privado vs Público
     if (isPrivate) {
       const btnId = `btn_ia_private_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -1784,7 +2201,7 @@ client.on('messageCreate', async (message) => {
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(btnId)
-          .setLabel('🔒 Ver Resposta Privada (Apenas Dr. Renato)')
+          .setLabel('🔒 Ver Resposta Privada')
           .setStyle(ButtonStyle.Secondary)
           .setEmoji('🔒')
       );
@@ -1794,13 +2211,20 @@ client.on('messageCreate', async (message) => {
         components: [row]
       }).catch(() => null);
     } else {
-      if (cleanReplyText.length <= 1900) {
-        await message.reply(`🤖 **IA Assistente (Dr. Renato):**\n${cleanReplyText}`).catch(() => null);
+      const headerText = isDrRenato ? '🤖 **IA Assistente (Dr. Renato):**\n' : '🤖 **IA Assistente:**\n';
+      let chunks = splitTextPreservingWords(cleanReplyText, 1850);
+
+      // Para cidadãos (usuários comuns), limita estritamente a no máximo 2 blocos de mensagem
+      if (!isDrRenato && chunks.length > 2) {
+        chunks = chunks.slice(0, 2);
+      }
+
+      if (chunks.length === 1) {
+        await message.reply(`${headerText}${chunks[0]}`).catch(() => null);
       } else {
-        const chunks = cleanReplyText.match(/[\s\S]{1,1900}/g) || [cleanReplyText];
         for (let i = 0; i < chunks.length; i++) {
           if (i === 0) {
-            await message.reply(`🤖 **IA Assistente (Parte 1/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
+            await message.reply(`${headerText}(Parte 1/${chunks.length}):\n${chunks[i]}`).catch(() => null);
           } else {
             await message.channel.send(`🤖 **(Parte ${i + 1}/${chunks.length}):**\n${chunks[i]}`).catch(() => null);
           }
@@ -1895,7 +2319,7 @@ client.on('messageCreate', async (message) => {
           return;
         }
 
-        const secretAutosName = `🤫 AUTOS SIGILOSOS - ${processName}`.substring(0, 100);
+        const secretAutosName = `AUTOS SIGILOSOS - ${processName}`.substring(0, 100);
 
         // Cria a thread privada de autos sigilosos no canal de texto selecionado
         const secretThread = await targetParent.threads.create({
@@ -1921,38 +2345,36 @@ client.on('messageCreate', async (message) => {
           }
         }
 
-        // Embed fixado e painel de controle
+        // Embed fixado e painel de controle sobrio e profissional
         const panelEmbed = new EmbedBuilder()
-          .setTitle('🤫 AUTOS E DOCUMENTOS SIGILOSOS')
+          .setTitle('AUTOS E DOCUMENTOS SIGILOSOS')
           .setDescription(
-            `Esta thread privativa foi aberta para envio e instrução de autos sigilosos/reservados referente ao processo:\n` +
-            `📂 **Processo de Origem:** \`${processName}\` (ID: \`${processThread.id}\`)\n\n` +
-            `📌 **INSTRUÇÃO DE ACESSO:**\n` +
-            `• **Acesso Inicial:** Usuário Solicitante (<@${message.author.id}>) e Magistrados.\n` +
-            `• **Conceder Acesso a Outros:** Basta **mencionar a pessoa no chat** (ex: \`@usuario\`) e ela receberá acesso automático a esta sala privativa!\n\n` +
-            `⚖️ **PAINEL DE CONTROLE DO MAGISTRADO:**\n` +
-            `• **Dar Baixa:** Encerra e apaga esta thread sem transferir arquivos.\n` +
-            `• **Publicar no Processo:** Apaga esta thread e transfere todos os documentos/autos sigilosos para a thread original do processo.`
+            `Sala privativa reservada para juntada e instrução de documentos sigilosos.\n\n` +
+            `**Processo de Origem:** \`${processName}\` (ID: \`${processThread.id}\`)\n\n` +
+            `**Instruções de Acesso:**\n` +
+            `• **Acesso Concedido:** Solicitante (<@${message.author.id}>) e Magistratura.\n` +
+            `• **Conceder Acesso:** Mencione o usuário no chat (\`@usuario\`) para liberação automática de acesso.\n\n` +
+            `**Painel de Controle (Magistrados):**\n` +
+            `• **Publicar no Processo:** Desclassifica o sigilo e transfere todos os documentos para a thread original com código oficial de remessa.\n` +
+            `• **Dar Baixa:** Encerra e apaga esta sala privativa sem transferência de arquivos.`
           )
-          .setColor(0x9b59b6)
-          .setFooter({ text: 'Tribunal de Justiça • Autos Sigilosos' })
+          .setColor(0x4a5568)
+          .setFooter({ text: 'Cartório Judicial • Autos Sigilosos' })
           .setTimestamp();
 
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId(`btn_autos_publicar_${processThread.id}`)
             .setLabel('Publicar no Processo')
-            .setStyle(ButtonStyle.Success)
-            .setEmoji('📢'),
+            .setStyle(ButtonStyle.Success),
           new ButtonBuilder()
             .setCustomId('btn_autos_baixa')
             .setLabel('Dar Baixa (Apagar)')
             .setStyle(ButtonStyle.Danger)
-            .setEmoji('🗑️')
         );
 
         const pinnedMsg = await secretThread.send({
-          content: `🤫 **Sala de Autos Sigilosos Aberta!** <@${message.author.id}>`,
+          content: `**Sala de Autos Sigilosos Aberta** (<@${message.author.id}>)`,
           embeds: [panelEmbed],
           components: [row]
         }).catch(() => null);
@@ -2835,63 +3257,84 @@ async function runPetitionWizard(thread, authorId, modalData) {
     if (targetThread) {
       const timeStamp = getFormattedDateTime();
       
-      // Busca ativa de cargos para evitar falhas de cache
+      // Busca ativa de cargos de Magistratura (Juízes de Direito / Magistrados)
       const roles = await guild.roles.fetch().catch(() => guild.roles.cache);
-      const juizRole = roles.find(r => r.name === 'J. Dir. | Juiz de Direito');
-      const promotorRole = roles.find(r => r.name === 'Prom. J | Promotor de Justiça');
+      const rolesArray = safeGetArray(roles);
+      
+      const juizRoles = rolesArray.filter(r => r && r.name && (
+        r.name === 'J. Dir. | Juiz de Direito' ||
+        r.name.toLowerCase().includes('juiz') ||
+        r.name.toLowerCase().includes('magistrad') ||
+        r.name.toLowerCase().includes('desembargad')
+      ));
+
+      const promotorRole = rolesArray.find(r => r && r.name && (
+        r.name === 'Prom. J | Promotor de Justiça' ||
+        r.name.toLowerCase().includes('promotor')
+      ));
       const promotorMention = promotorRole ? `<@&${promotorRole.id}>` : '@Prom. J | Promotor de Justiça';
 
-      // Sorteio de magistrado do Judiciário com fetching forçado e logs
+      // Sorteio de Magistrado percorrendo TODOS os Juízes/Magistrados presentes no servidor
       let selectedJuizMention = 'Não designado';
-      if (juizRole) {
-        try {
-          const members = await guild.members.fetch({ force: true }).catch(() => null);
-          const membersArray = safeGetArray(members);
-          const juizes = membersArray.filter(m => m && m.roles && m.roles.cache && m.roles.cache.has(juizRole.id));
-          
-          console.log(`[Juízes Sorteio] Procurando membros com cargo "${juizRole.name}"...`);
-          console.log(`[Juízes Sorteio] Juízes encontrados no servidor: ${juizes.map(m => m.user.tag).join(', ')}`);
-          
-          if (juizes && juizes.length > 0) {
-            const randomJuiz = juizes[Math.floor(Math.random() * juizes.length)];
-            selectedJuizMention = `<@${randomJuiz.id}>`;
+      try {
+        const members = await guild.members.fetch({ force: true }).catch(() => null);
+        const membersArray = safeGetArray(members);
+        
+        const juizRoleIds = new Set(juizRoles.map(r => r.id));
+        const juizes = membersArray.filter(m => m && !m.user.bot && m.roles && m.roles.cache && m.roles.cache.some(r => juizRoleIds.has(r.id)));
+        
+        console.log(`[Juízes Sorteio] Magistrados/Juízes encontrados no servidor (${juizes.length}): ${juizes.map(m => m.user.tag).join(', ')}`);
+        
+        if (juizes && juizes.length > 0) {
+          const randomJuiz = juizes[Math.floor(Math.random() * juizes.length)];
+          selectedJuizMention = `<@${randomJuiz.id}>`;
 
-            // Incrementa o contador do juiz sorteado no cache em memória
-            if (randomJuiz.id in juizWorkloadsCache) {
-              juizWorkloadsCache[randomJuiz.id]++;
-            } else {
-              juizWorkloadsCache[randomJuiz.id] = 1;
-            }
+          if (randomJuiz.id in juizWorkloadsCache) {
+            juizWorkloadsCache[randomJuiz.id]++;
           } else {
-            // Fallback para menção do cargo caso não encontre membros individuais
-            selectedJuizMention = `<@&${juizRole.id}>`;
+            juizWorkloadsCache[randomJuiz.id] = 1;
           }
-        } catch (fetchErr) {
-          console.error('Erro ao buscar membros para sorteio do Juiz:', fetchErr);
-          selectedJuizMention = `<@&${juizRole.id}>`;
+        } else if (juizRoles.length > 0) {
+          selectedJuizMention = `<@&${juizRoles[0].id}>`;
         }
-      } else {
-        selectedJuizMention = 'Não designado (Cargo de Juiz de Direito não encontrado)';
+      } catch (fetchErr) {
+        console.error('Erro ao buscar membros para sorteio do Juiz:', fetchErr);
+        if (juizRoles.length > 0) selectedJuizMention = `<@&${juizRoles[0].id}>`;
       }
 
       // Movimentação Inicial Unificada
-      const unifiedMov = `=========================================\n` +
-                         `🏛️ **DISTRIBUIÇÃO E CITAÇÃO - CARTÓRIO JUDICIAL**\n` +
-                         `📅 *Movimentação em: ${timeStamp}*\n\n` +
-                         `> ⚖️ **Sorteio de Magistrado:** O processo foi distribuído por sorteio automático ao Excelentíssimo Senhor Juiz de Direito: ${selectedJuizMention}.\n` +
+      const unifiedMov = `-----------------------------------------\n` +
+                         `**DISTRIBUIÇÃO E CITAÇÃO - CARTÓRIO JUDICIAL**\n` +
+                         `*Movimentação em: ${timeStamp}*\n\n` +
+                         `> **Sorteio de Magistrado:** Processo distribuído por sorteio ao Excelentíssimo Senhor Juiz de Direito: ${selectedJuizMention}.\n` +
                          `> \n` +
-                         `> 📂 **Recebimento e Distribuição:** Processo autuado e distribuído. Aguardando designação e manifestação do magistrado designado, bem como do Ministério Público (${promotorMention}).\n` +
+                         `> **Recebimento e Distribuição:** Processo autuado e distribuído. Aguardando manifestação do magistrado designado e do Ministério Público (${promotorMention}).\n` +
                          `> \n` +
-                         `> 📌 **Instruções para as partes:**\n` +
-                         `> 1. *Parte Autora:* Anexe nesta thread quaisquer documentos ou provas que julgar necessárias para o prosseguimento.\n` +
-                         `> 2. *Registro de Procuradores:* O advogado de qualquer um dos polos deve declarar-se enviando o comando \`!adv\` nesta thread.\n` +
-                         `>    *(As mensagens do comando serão ocultadas automaticamente e os nomes inseridos na autuação).* \n\n` +
-                         `📢 **Certidão de Citação:** Iniciada a citação de todas as partes envolvidas. Os mandados de citação contendo instruções detalhadas de defesa/manifestação já foram expedidos e enviados via mensagem direta (DM) privada para os Discords informados.\n` +
-                         `=========================================`;
+                         `> **Instruções:**\n` +
+                         `> 1. *Parte Autora:* Anexe nesta thread quaisquer documentos, petições ou provas que julgar necessárias para o prosseguimento.\n` +
+                         `> 2. *Contraditório:* A Parte Ré poderá manifestar sua defesa nos autos após o despacho do magistrado.\n\n` +
+                         `**Certidão de Citação:** Citação expedida via mensagem privada (DM) para os Discords das partes informadas.\n` +
+                         `-----------------------------------------`;
 
       await targetThread.send(unifiedMov).catch(() => null);
 
-      // Envio de Citação e Instruções por DM para os envolvidos (com nome do servidor e canal/thread)
+      // Chamada de Comandos Básicos do Processo
+      const comandosBasicosMov = `-----------------------------------------\n` +
+                                 `**COMANDOS BÁSICOS DO PROCESSO**\n` +
+                                 `*Guia de utilização nos autos*\n\n` +
+                                 `• **\`!partes\`** - Vincular ou alterar as partes envolvidas (Autor / Réu).\n` +
+                                 `• **\`!ia <pergunta>\`** - Consultar a IA Assistente (análise jurídica e resumos).\n` +
+                                 `• **\`!autos-sigilosos\`** - Abrir sala privativa reservada para documentos sigilosos.\n\n` +
+                                 `**Comandos da Magistratura (Juízes de Direito):**\n` +
+                                 `• **\`!oficio\`** - Expedir Ofício Judicial / Ato Ordinatório.\n` +
+                                 `• **\`!intimar\`** - Expedir intimação judicial via DM.\n` +
+                                 `• **\`!segredo\`** - Decretar Segredo de Justiça no processo.\n` +
+                                 `• **\`!arquivar\`** - Encerrar o processo e transferir os autos ao Arquivo Geral.\n` +
+                                 `-----------------------------------------`;
+
+      await targetThread.send(comandosBasicosMov).catch(() => null);
+
+      // Envio de Citação e Instruções por DM para os envolvidos
       
       // Citação do Autor
       if (data.discordAuthor) {
@@ -2907,8 +3350,7 @@ async function runPetitionWizard(thread, authorId, modalData) {
             `* **Réu/Executado:** ${data.defendantName}\n\n` +
             `**O que fazer:**\n` +
             `1. Acesse o processo no link acima.\n` +
-            `2. **Importante:** Utilize o comando \`!adv\` na thread do processo para vincular seus advogados de defesa à autuação.\n` +
-            `3. Anexe os documentos e provas que desejar na respectiva thread.`
+            `2. Anexe a petição inicial completa, documentos e provas diretamente na thread do processo.`
           );
         } catch (dmErr) {
           console.warn(`Não foi possível enviar DM de citação para o Autor: ${data.discordAuthor.tag}`);
@@ -2928,8 +3370,7 @@ async function runPetitionWizard(thread, authorId, modalData) {
             `* **Réu/Executado:** ${data.defendantName}\n\n` +
             `**O que fazer:**\n` +
             `1. Acesse o processo no link acima (se for Segredo de Justiça, você foi adicionado à thread privada).\n` +
-            `2. **Importante:** Utilize o comando \`!adv\` na thread do processo para vincular seus advogados de defesa à autuação.\n` +
-            `3. Aguarde a manifestação e o despacho do Juiz de Direito designado para o caso antes de enviar qualquer defesa formal na thread.`
+            `2. Aguarde a manifestação e o despacho do Juiz de Direito designado para o caso antes de enviar qualquer defesa formal na thread.`
           );
         } catch (dmErr) {
           console.warn(`Não foi possível enviar DM de citação para o Réu: ${data.discordDefendant.tag}`);
@@ -4050,17 +4491,39 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.customId === 'modal_oficio') {
       try {
         await interaction.deferReply().catch(() => null);
-        const content = interaction.fields.getTextInputValue('oficio_content');
+        const content = interaction.fields.getTextInputValue('oficio_content').trim();
         const timeStamp = getFormattedDateTime();
+
+        const formattedContent = content.split('\n').map(line => `> ${line}`).join('\n');
         
-        const movMsg = `=========================================\n` +
-                       `⚖️ **OFÍCIO / ATO ORDINATÓRIO**\n` +
-                       `📅 *Movimentação em: ${timeStamp}*\n\n` +
-                       `> **Determinação Judicial (Juiz <@${interaction.user.id}>):**\n` +
-                       `> ${content.split('\n').join('\n> ')}\n` +
-                       `=========================================`;
-                       
-        await interaction.editReply({ content: movMsg }).catch(() => null);
+        const fullHeader = `-----------------------------------------\n` +
+                           `**OFÍCIO / ATO ORDINATÓRIO**\n` +
+                           `*Movimentação em: ${timeStamp}*\n\n` +
+                           `> **Determinação Judicial (Juiz <@${interaction.user.id}>):**\n`;
+        const fullFooter = `\n-----------------------------------------`;
+
+        const fullMsg = `${fullHeader}${formattedContent}${fullFooter}`;
+
+        if (fullMsg.length <= 1900) {
+          await interaction.editReply({ content: fullMsg }).catch(() => null);
+        } else {
+          // Divisão preservando palavras completas e parágrafos sem cortar palavras no meio
+          const chunks = splitTextPreservingWords(formattedContent, 1600);
+          for (let i = 0; i < chunks.length; i++) {
+            const chunkHeader = i === 0 
+              ? `${fullHeader}` 
+              : `*OFÍCIO (Parte ${i + 1}/${chunks.length}):*\n`;
+            
+            const chunkFooter = i === chunks.length - 1 ? `${fullFooter}` : '';
+            const chunkContent = `${chunkHeader}${chunks[i]}${chunkFooter}`;
+
+            if (i === 0) {
+              await interaction.editReply({ content: chunkContent }).catch(() => null);
+            } else {
+              await interaction.channel.send({ content: chunkContent }).catch(() => null);
+            }
+          }
+        }
 
         // Pergunta sobre a DM de forma efêmera no chat da thread
         await interaction.followUp({
@@ -4078,18 +4541,28 @@ client.on('interactionCreate', async (interaction) => {
           if (contentMsg !== 'nenhum' && contentMsg !== 'nao' && contentMsg !== 'não' && contentMsg !== 'pular') {
             const userIds = [...userMsg.content.matchAll(/<@!?(\d+)>/g)].map(m => m[1]);
             if (userIds.length > 0) {
-              const dmNotify = `🏛️ **NOTIFICAÇÃO DE OFÍCIO JUDICIAL**\n\n` +
-                               `Prezado(a), você está sendo notificado(a) sobre a expedição de um Ofício/Ato Judicial.\n\n` +
-                               `**Teor do Ofício:**\n` +
-                               `> ${content.split('\n').join('\n> ')}\n\n` +
-                               `* **Origem:** Processo na thread <#${interaction.channel.id}>\n` +
-                               `* **Expedido por:** Juiz <@${interaction.user.id}>`;
+              const baseDmHeader = `🏛️ **NOTIFICAÇÃO DE OFÍCIO JUDICIAL**\n\n` +
+                                   `Prezado(a), você está sendo notificado(a) sobre a expedição de um Ofício/Ato Judicial.\n\n` +
+                                   `* **Origem:** Processo na thread <#${interaction.channel.id}>\n` +
+                                   `* **Expedido por:** Juiz <@${interaction.user.id}>\n\n` +
+                                   `**Teor do Ofício:**\n`;
 
               for (const userId of userIds) {
                 try {
                   const targetUser = await client.users.fetch(userId).catch(() => null);
                   if (targetUser) {
-                    await targetUser.send(dmNotify).catch(() => null);
+                    if ((baseDmHeader + formattedContent).length <= 1900) {
+                      await targetUser.send(`${baseDmHeader}${formattedContent}`).catch(() => null);
+                    } else {
+                      const dmChunks = splitTextPreservingWords(formattedContent, 1600);
+                      for (let i = 0; i < dmChunks.length; i++) {
+                        if (i === 0) {
+                          await targetUser.send(`${baseDmHeader}${dmChunks[i]}`).catch(() => null);
+                        } else {
+                          await targetUser.send(`*(Ofício Parte ${i + 1}/${dmChunks.length}):*\n${dmChunks[i]}`).catch(() => null);
+                        }
+                      }
+                    }
                   }
                 } catch (dmErr) {
                   console.warn(`[Ofício DM] Falha ao notificar usuário ${userId}:`, dmErr);
@@ -4097,7 +4570,6 @@ client.on('interactionCreate', async (interaction) => {
               }
             }
           }
-          // Deleta a mensagem do juiz para limpar o chat
           await userMsg.delete().catch(() => null);
         }
       } catch (err) {
@@ -4173,7 +4645,7 @@ client.on('interactionCreate', async (interaction) => {
 
         let pet_autor = (interaction.fields.getTextInputValue('pet_autor') || '').trim();
         const pet_reu = (interaction.fields.getTextInputValue('pet_reu') || '').trim();
-        const pet_texto = (interaction.fields.getTextInputValue('pet_texto') || '').trim();
+        const pet_texto = 'Aguardando juntada de petição inicial e provas pelas partes nos autos.';
 
         // Para processos criminais, o autor é obrigatoriamente o Ministério Público do Paraná
         if (isCriminal) {
@@ -4470,6 +4942,170 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    // BOTÃO DE SOLICITAÇÃO DE DENÚNCIA (MINISTÉRIO PÚBLICO)
+    if (interaction.customId === 'btn_abrir_ticket_denuncia') {
+      try {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+        const guild = interaction.guild;
+        const user = interaction.user;
+
+        // 1. Busca Categoria "➲ MINISTÉRIO PÚBLICO" ou variante
+        const allChannels = await guild.channels.fetch().catch(() => guild.channels.cache);
+        const channelsArray = safeGetArray(allChannels);
+        const mpCategory = channelsArray.find(c => 
+          c && c.type === ChannelType.GuildCategory && (
+            matchChannel(c.name, 'ministerio publico') ||
+            matchChannel(c.name, 'ministério público') ||
+            matchChannel(c.name, 'ministerio-publico') ||
+            matchChannel(c.name, 'promotoria') ||
+            c.name.toLowerCase().includes('ministério público') ||
+            c.name.toLowerCase().includes('ministerio publico') ||
+            c.name.toLowerCase().includes('promotor')
+          )
+        );
+
+        // 2. Busca o cargo de Promotor de Justiça
+        const roles = await guild.roles.fetch().catch(() => guild.roles.cache);
+        const rolesArray = safeGetArray(roles);
+        const promotorRole = rolesArray.find(r => r && r.name && (
+          r.name === 'Prom. J | Promotor de Justiça' ||
+          r.name === 'Promotor de Justiça - MPPR' ||
+          r.name.trim().toLowerCase() === ROLE_PROMOTOR_NOME.trim().toLowerCase() ||
+          r.name.toLowerCase().includes('promotor')
+        ));
+
+        const cleanUsername = user.username.toLowerCase().replace(/[^a-z0-9_-]/g, '').substring(0, 70);
+        const ticketChannelName = `denuncia-${cleanUsername || user.id}`;
+
+        // 3. Verifica se o usuário já possui um ticket de denúncia aberto
+        const existingChannel = channelsArray.find(c => 
+          c && c.type === ChannelType.GuildText && 
+          c.name === ticketChannelName && 
+          (!mpCategory || c.parentId === mpCategory.id)
+        );
+
+        if (existingChannel) {
+          await interaction.editReply({
+            content: `⚠️ **Você já possui uma denúncia em andamento!**\nAcesse o seu canal reservado do Ministério Público: <#${existingChannel.id}>`
+          }).catch(() => null);
+          return;
+        }
+
+        // 4. Configuração de Permissões (Privado: apenas Denunciante, Promotores e Bot)
+        const permissionOverwrites = [
+          {
+            id: guild.roles.everyone.id,
+            deny: [PermissionFlagsBits.ViewChannel]
+          },
+          {
+            id: user.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+              PermissionFlagsBits.AttachFiles,
+              PermissionFlagsBits.EmbedLinks
+            ]
+          },
+          {
+            id: client.user.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ManageChannels,
+              PermissionFlagsBits.ReadMessageHistory,
+              PermissionFlagsBits.EmbedLinks
+            ]
+          }
+        ];
+
+        if (promotorRole) {
+          permissionOverwrites.push({
+            id: promotorRole.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+              PermissionFlagsBits.AttachFiles,
+              PermissionFlagsBits.EmbedLinks
+            ]
+          });
+        }
+
+        // 5. Criação do Canal Privado no Ministério Público
+        const channelOptions = {
+          name: ticketChannelName,
+          type: ChannelType.GuildText,
+          permissionOverwrites: permissionOverwrites,
+          reason: `Denúncia registrada por ${user.tag}`
+        };
+
+        if (mpCategory) {
+          channelOptions.parent = mpCategory.id;
+        }
+
+        const ticketChannel = await guild.channels.create(channelOptions);
+
+        const promotorMention = promotorRole ? `<@&${promotorRole.id}>` : '@Promotores';
+
+        const welcomeEmbed = new EmbedBuilder()
+          .setTitle('🚨 MINISTÉRIO PÚBLICO - NOVA DENÚNCIA REGISTRADA')
+          .setDescription(
+            `Olá <@${user.id}>! Sua denúncia foi iniciada e enviada ao **Ministério Público**.\n\n` +
+            `📝 **Orientações ao Denunciante:**\n` +
+            `1. Descreva detalhadamente os fatos, apontando nomes, locais e datas.\n` +
+            `2. Anexe todas as provas disponíveis (prints, fotos, vídeos, depoimentos ou links de processos).\n\n` +
+            `⚖️ **Atenção:** Os Doutos Promotores de Justiça (${promotorMention}) foram notificados e analisarão o seu caso em breve.\n\n` +
+            `*Este canal é estritamente confidencial e visível apenas a você e aos Promotores de Justiça.*`
+          )
+          .setColor(0xc0392b)
+          .setFooter({ text: 'Ministério Público • Governo Federal / Poder Judiciário' })
+          .setTimestamp();
+
+        const closeRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId('btn_fechar_ticket_denuncia')
+            .setLabel('🔒 Fechar Denúncia')
+            .setStyle(ButtonStyle.Secondary)
+        );
+
+        await ticketChannel.send({
+          content: `${promotorMention} 🔔 **Nova Denúncia Recebida:** O usuário <@${user.id}> registrou uma nova denúncia.`,
+          embeds: [welcomeEmbed],
+          components: [closeRow]
+        });
+
+        await interaction.editReply({
+          content: `✅ **Denúncia registrada com sucesso!**\nAcesse o seu canal reservado do Ministério Público: <#${ticketChannel.id}>`
+        }).catch(() => null);
+
+      } catch (errDenuncia) {
+        console.error('Erro ao abrir ticket de denúncia:', errDenuncia);
+        await interaction.editReply({ content: '❌ Ocorreu um erro interno ao abrir o canal de denúncia. Verifique as permissões do bot.' }).catch(() => null);
+      }
+      return;
+    }
+
+    // BOTÃO DE FECHAR TICKET DE DENÚNCIA
+    if (interaction.customId === 'btn_fechar_ticket_denuncia') {
+      try {
+        await interaction.deferReply().catch(() => null);
+        await interaction.editReply({
+          content: `🔒 **Encerrando Denúncia:** Este canal será excluído em **5 segundos** por solicitação de <@${interaction.user.id}>...`
+        });
+
+        setTimeout(async () => {
+          await interaction.channel.delete('Ticket de denúncia finalizado').catch(err => {
+            console.error('Erro ao excluir canal de denúncia:', err);
+          });
+        }, 5000);
+      } catch (errClose) {
+        console.error('Erro no botão fechar denúncia:', errClose);
+      }
+      return;
+    }
+
     // BOTAO DE RESPOSTA PRIVADA DA IA (!ia privada)
     if (interaction.customId.startsWith('btn_ia_private_')) {
       const data = privateIaResponses.get(interaction.customId);
@@ -4695,18 +5331,10 @@ client.on('interactionCreate', async (interaction) => {
           .setPlaceholder('Ex: João Souza (Nome do acusado/réu)')
           .setRequired(true);
 
-        const inputTexto = new TextInputBuilder()
-          .setCustomId('pet_texto')
-          .setLabel('Petição Inicial (Texto / Fatos)')
-          .setStyle(TextInputStyle.Paragraph)
-          .setPlaceholder('Descreva os fatos e fundamentos da sua petição inicial...')
-          .setRequired(true);
-
         modal.addComponents(
           new ActionRowBuilder().addComponents(inputTipo),
           new ActionRowBuilder().addComponents(inputAutor),
-          new ActionRowBuilder().addComponents(inputReu),
-          new ActionRowBuilder().addComponents(inputTexto)
+          new ActionRowBuilder().addComponents(inputReu)
         );
 
         await interaction.showModal(modal).catch(() => null);
