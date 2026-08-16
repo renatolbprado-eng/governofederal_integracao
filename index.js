@@ -47,6 +47,18 @@ const pendingManualRoleInput = new Map();
 const privateIaResponses = new Map();
 
 // Controle de suspensão temporária de 1h para uso da IA fora do contexto do RP
+function safeTruncateField(str, maxLen = 1000) {
+  if (!str || typeof str !== 'string') return '⚪ Nenhum registro localizado';
+  const trimmed = str.trim();
+  if (trimmed.length <= maxLen) return trimmed;
+  const cut = trimmed.substring(0, maxLen);
+  const lastNewline = cut.lastIndexOf('\n');
+  if (lastNewline > 200) {
+    return cut.substring(0, lastNewline) + '\n... *(e outros registros)*';
+  }
+  return cut + '...';
+}
+
 const iaBannedUsers = new Map();
 
 // --- SISTEMA DE RESTRIÇÕES JUDICIAIS E POLÍTICAS (!restringir) ---
@@ -3347,27 +3359,27 @@ client.on('messageCreate', async (message) => {
       }
 
       const formattedWarrants = bnmpEntries.length > 0
-        ? bnmpEntries.slice(0, 10).join('\n')
+        ? bnmpEntries.join('\n')
         : '🟢 Nenhum mandado ou registro de prisão encontrado no canal BNMP';
 
       const formattedContratos = contratosFound.length > 0
-        ? contratosFound.slice(0, 10).join('\n')
+        ? contratosFound.join('\n')
         : '⚪ Nenhum contrato ou ato jurídico localizado';
 
       const formattedCompanies = empFound.length > 0
-        ? empFound.slice(0, 10).join('\n')
+        ? empFound.join('\n')
         : '⚪ Nenhuma empresa comercial registrada';
 
       const formattedCivil = civilFound.length > 0
-        ? civilFound.slice(0, 10).join('\n')
+        ? civilFound.join('\n')
         : '⚪ Nenhum registro civil ou assentamento localizado';
 
       const formattedOffices = lawOfficesFound.length > 0
-        ? lawOfficesFound.slice(0, 10).join('\n')
+        ? lawOfficesFound.join('\n')
         : '⚪ Nenhum escritório de advocacia vinculado';
 
       const formattedProcesses = processList.length > 0
-        ? processList.slice(0, 10).join('\n')
+        ? processList.join('\n')
         : '⚪ Nenhuma citação processual ativa localizada';
 
       // --- EMBED DOSSIÊ SECBASE ---
@@ -3380,14 +3392,14 @@ client.on('messageCreate', async (message) => {
           `> **Data de Ingresso:** ${targetMember.joinedAt ? targetMember.joinedAt.toLocaleDateString('pt-BR') : 'Não informada'}`
         )
         .addFields(
-          { name: '👤 Cargos & Habilitações no Governo Federal', value: rpRoles.length > 1024 ? rpRoles.substring(0, 1000) + '...' : rpRoles },
-          { name: '🎖️ Vínculos & Cargos nas Corporações (PF, PM & RONE)', value: formattedCorpRoles.length > 1024 ? formattedCorpRoles.substring(0, 1000) + '...' : formattedCorpRoles },
-          { name: '📜 Cartório - Contratos & Instrumentos', value: formattedContratos },
-          { name: '🏛️ Escritórios de Advocacia & Registros OAB', value: formattedOffices },
-          { name: '🏢 Cartório - Registro de Empresas (PJs)', value: formattedCompanies },
-          { name: '📄 Cartório - Registro Civil & Atos Pessoais', value: formattedCivil },
-          { name: '⚖️ Processos & Citações Judiciais', value: formattedProcesses },
-          { name: '🚨 Ficha Criminal / BNMP', value: formattedWarrants }
+          { name: '👤 Cargos & Habilitações no Governo Federal', value: safeTruncateField(rpRoles) },
+          { name: '🎖️ Vínculos & Cargos nas Corporações (PF, PM & RONE)', value: safeTruncateField(formattedCorpRoles) },
+          { name: '📜 Cartório - Contratos & Instrumentos', value: safeTruncateField(formattedContratos) },
+          { name: '🏛️ Escritórios de Advocacia & Registros OAB', value: safeTruncateField(formattedOffices) },
+          { name: '🏢 Cartório - Registro de Empresas (PJs)', value: safeTruncateField(formattedCompanies) },
+          { name: '📄 Cartório - Registro Civil & Atos Pessoais', value: safeTruncateField(formattedCivil) },
+          { name: '⚖️ Processos & Citações Judiciais', value: safeTruncateField(formattedProcesses) },
+          { name: '🚨 Ficha Criminal / BNMP', value: safeTruncateField(formattedWarrants) }
         )
         .setColor(0x1a252f)
         .setFooter({ text: 'Poder Judiciário • SECBASE | Relatório de Inteligência' })
