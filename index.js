@@ -3054,34 +3054,64 @@ client.on('messageCreate', async (message) => {
 
       const targetUser = message.mentions.users.first();
       let targetMember = null;
+      let targetUserObj = null;
       let targetId = null;
 
       const args = message.content.trim().split(/\s+/).slice(1);
       const queryParam = args.join(' ').trim();
 
       if (targetUser) {
+        targetUserObj = targetUser;
         targetId = targetUser.id;
         targetMember = await message.guild.members.fetch(targetId).catch(() => null);
       } else if (queryParam) {
         const cleanId = queryParam.replace(/[<@!>]/g, '');
         if (/^\d{17,20}$/.test(cleanId)) {
+          targetId = cleanId;
           targetMember = await message.guild.members.fetch(cleanId).catch(() => null);
-          if (targetMember) targetId = targetMember.user.id;
+          if (targetMember) {
+            targetUserObj = targetMember.user;
+          } else {
+            // Tenta localizar o membro nos demais servidores conectados (PF, PM, RONE, etc)
+            for (const g of client.guilds.cache.values()) {
+              const extM = await g.members.fetch(cleanId).catch(() => null);
+              if (extM) {
+                targetMember = extM;
+                targetUserObj = extM.user;
+                break;
+              }
+            }
+            // Se não estiver em nenhuma guilda conectada, busca a conta global do Discord via API
+            if (!targetUserObj) {
+              targetUserObj = await client.users.fetch(cleanId).catch(() => null);
+            }
+          }
         } else {
-          const members = await message.guild.members.fetch({ query: queryParam, limit: 5 }).catch(() => null);
+          let members = await message.guild.members.fetch({ query: queryParam, limit: 5 }).catch(() => null);
           if (members && members.size > 0) {
             targetMember = members.first();
-            targetId = targetMember.user.id;
+            targetUserObj = targetMember.user;
+            targetId = targetUserObj.id;
+          } else {
+            for (const g of client.guilds.cache.values()) {
+              const extMembers = await g.members.fetch({ query: queryParam, limit: 5 }).catch(() => null);
+              if (extMembers && extMembers.size > 0) {
+                targetMember = extMembers.first();
+                targetUserObj = targetMember.user;
+                targetId = targetUserObj.id;
+                break;
+              }
+            }
           }
         }
       }
 
-      if (!targetId || !targetMember) {
-        await message.reply('⚠️ **Uso Incorreto:** Sintaxe: `!secbase @usuario` ou `!secbase <ID_do_usuario>`').catch(() => null);
+      if (!targetId || !targetUserObj) {
+        await message.reply('❌ **Usuário não localizado:** Não foi possível encontrar o usuário por menção, ID ou nome nos servidores ou na base do Discord.').catch(() => null);
         return;
       }
 
-      const target = targetMember.user;
+      const target = targetUserObj;
       const progressMsg = await message.reply(`🔍 **SECBASE:** Iniciando varredura profunda no banco de dados para <@${target.id}>...`).catch(() => null);
 
       const allChannels = await message.guild.channels.fetch().catch(() => message.guild.channels.cache);
@@ -3090,7 +3120,7 @@ client.on('messageCreate', async (message) => {
       targetId = target.id;
       const targetUserLower = target.username.toLowerCase();
       const targetTagLower = target.tag ? target.tag.toLowerCase() : '';
-      const rawDisplayName = targetMember.displayName || '';
+      const rawDisplayName = targetMember ? targetMember.displayName : target.username;
 
       // Limpa títulos honoríficos e profissionais do nickname On-RP
       const cleanNick = rawDisplayName
@@ -3131,10 +3161,9 @@ client.on('messageCreate', async (message) => {
       }
 
       // 1. Cargo On-RP & Roles no Governo Federal
-      const rpRoles = targetMember.roles.cache
-        .filter(r => r.name !== '@everyone')
-        .map(r => r.name)
-        .join(', ') || 'Nenhum cargo atribuído';
+      const rpRoles = targetMember
+        ? (targetMember.roles.cache.filter(r => r.name !== '@everyone').map(r => r.name).join(', ') || 'Nenhum cargo atribuído')
+        : '⚪ Não cadastrado no servidor do Governo Federal';
 
       // 1.1. Varredura de Roles em Corporações Externa (Polícia Federal, PM, RONE)
       const corpRolesFound = [];
