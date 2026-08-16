@@ -3087,19 +3087,47 @@ client.on('messageCreate', async (message) => {
       const allChannels = await message.guild.channels.fetch().catch(() => message.guild.channels.cache);
       const channelsArray = safeGetArray(allChannels);
 
+      targetId = target.id;
       const targetUserLower = target.username.toLowerCase();
-      const targetNickLower = targetMember.displayName.toLowerCase();
-      const targetWords = [
-        target.id,
-        targetUserLower,
-        targetNickLower,
-        ...targetNickLower.split(/\s+/).filter(w => w.length >= 3 && !['dr.', 'dra.', 'adv.', 'adv', 'de', 'da', 'do', 'dos', 'das'].includes(w))
-      ];
+      const targetTagLower = target.tag ? target.tag.toLowerCase() : '';
+      const rawDisplayName = targetMember.displayName || '';
 
-      function isMatchTarget(text) {
+      // Limpa títulos honoríficos e profissionais do nickname On-RP
+      const cleanNick = rawDisplayName
+        .replace(/^(dr\.|dra\.|adv\.|juiz\.|promotor\.|policial\.|cel\.|cap\.|ten\.|sgt\.|magistrado|magistrada)\s*/i, '')
+        .trim()
+        .toLowerCase();
+
+      function isMatchTarget(text, postOwnerId = null) {
+        if (postOwnerId && postOwnerId === targetId) return true;
         if (!text) return false;
+
         const textLow = text.toLowerCase();
-        return targetWords.some(word => textLow.includes(word));
+
+        // 1. Ignora totalmente tópicos de Modelo, Template e Instruções Gerais
+        if (
+          textLow.includes('modelo:') || 
+          textLow.includes('[modelo]') || 
+          textLow.includes('modelo de') || 
+          textLow.includes('template') || 
+          textLow.includes('instruções de registro')
+        ) {
+          return false;
+        }
+
+        // 2. Busca por ID numérico direto (ex: 123456789 ou <@123456789>)
+        if (textLow.includes(targetId)) return true;
+
+        // 3. Busca por Username exato ou Tag exata
+        if (targetUserLower && targetUserLower.length >= 3 && textLow.includes(targetUserLower)) return true;
+        if (targetTagLower && targetTagLower.length >= 3 && textLow.includes(targetTagLower)) return true;
+
+        // 4. Busca pelo Nome On-RP Completo (frase inteira limpa, min. 4 letras)
+        if (cleanNick && cleanNick.length >= 4 && !['advogado', 'advocacia', 'governo', 'corregedoria', 'policia', 'membro', 'usuario'].includes(cleanNick)) {
+          if (textLow.includes(cleanNick)) return true;
+        }
+
+        return false;
       }
 
       // 1. Cargo On-RP & Roles no Governo Federal
@@ -3152,12 +3180,13 @@ client.on('messageCreate', async (message) => {
       for (const chan of contratosChannels) {
         const posts = await fetchAllPostsFromChannel(chan);
         for (const post of posts) {
-          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          if (post.name.toUpperCase().includes('MODELO')) continue;
+          let matched = post.ownerId === target.id || isMatchTarget(post.name, post.ownerId);
           if (!matched) {
             const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
             if (msgs) {
               for (const m of msgs.values()) {
-                if (isMatchTarget(m.content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+                if (isMatchTarget(m.content, m.author.id) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
                   matched = true;
                   break;
                 }
@@ -3183,13 +3212,14 @@ client.on('messageCreate', async (message) => {
       for (const chan of empChannels) {
         const posts = await fetchAllPostsFromChannel(chan);
         for (const post of posts) {
-          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          if (post.name.toUpperCase().includes('MODELO')) continue;
+          let matched = post.ownerId === target.id || isMatchTarget(post.name, post.ownerId);
           let cnpjStr = '';
           const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
           if (msgs) {
             for (const m of msgs.values()) {
               const content = m.content || '';
-              if (isMatchTarget(content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+              if (isMatchTarget(content, m.author.id) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
                 matched = true;
               }
               const cnpjMatch = (content + ' ' + JSON.stringify(m.embeds || [])).match(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/g);
@@ -3222,12 +3252,13 @@ client.on('messageCreate', async (message) => {
       for (const chan of civilChannels) {
         const posts = await fetchAllPostsFromChannel(chan);
         for (const post of posts) {
-          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          if (post.name.toUpperCase().includes('MODELO')) continue;
+          let matched = post.ownerId === target.id || isMatchTarget(post.name, post.ownerId);
           if (!matched) {
             const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
             if (msgs) {
               for (const m of msgs.values()) {
-                if (isMatchTarget(m.content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+                if (isMatchTarget(m.content, m.author.id) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
                   matched = true;
                   break;
                 }
@@ -3255,13 +3286,14 @@ client.on('messageCreate', async (message) => {
       for (const chan of officeChannels) {
         const posts = await fetchAllPostsFromChannel(chan);
         for (const post of posts) {
-          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          if (post.name.toUpperCase().includes('MODELO')) continue;
+          let matched = post.ownerId === target.id || isMatchTarget(post.name, post.ownerId);
           let cnpjStr = '';
           const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
           if (msgs) {
             for (const m of msgs.values()) {
               const content = m.content || '';
-              if (isMatchTarget(content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+              if (isMatchTarget(content, m.author.id) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
                 matched = true;
               }
               const cnpjMatch = (content + ' ' + JSON.stringify(m.embeds || [])).match(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/g);
@@ -3288,12 +3320,13 @@ client.on('messageCreate', async (message) => {
       for (const jChan of judChannels) {
         const posts = await fetchAllPostsFromChannel(jChan);
         for (const post of posts) {
-          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          if (post.name.toUpperCase().includes('MODELO')) continue;
+          let matched = post.ownerId === target.id || isMatchTarget(post.name, post.ownerId);
           if (!matched) {
             const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
             if (msgs) {
               for (const m of msgs.values()) {
-                if (isMatchTarget(m.content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+                if (isMatchTarget(m.content, m.author.id) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
                   matched = true;
                   break;
                 }
@@ -3327,7 +3360,7 @@ client.on('messageCreate', async (message) => {
               (m.embeds ? m.embeds.map(e => `${e.title || ''} ${e.description || ''} ${e.fields ? e.fields.map(f => `${f.name}: ${f.value}`).join(' ') : ''}`).join(' ') : '')
             ).toUpperCase();
 
-            if (isMatchTarget(fullContentUpper)) {
+            if (isMatchTarget(fullContentUpper, m.author.id)) {
               let title = 'Registro de Mandado no BNMP';
               if (m.embeds && m.embeds.length > 0 && m.embeds[0].title) {
                 title = m.embeds[0].title;
@@ -3343,7 +3376,8 @@ client.on('messageCreate', async (message) => {
 
         const posts = await fetchAllPostsFromChannel(bnmpChan);
         for (const post of posts) {
-          if (post.ownerId === target.id || isMatchTarget(post.name)) {
+          if (post.name.toUpperCase().includes('MODELO')) continue;
+          if (post.ownerId === target.id || isMatchTarget(post.name, post.ownerId)) {
             bnmpEntries.push(`• **Solicitação/Thread de Prisão**: <#${post.id}> - ${post.name}`);
           }
         }
