@@ -159,7 +159,15 @@ Para manter o bot online 24 horas por dia gratuitamente ou em nuvem no Render:
 
 | Comando | Onde Usar | Cargo Exigido | Descrição |
 | :--- | :--- | :--- | :--- |
-| `!setup-denuncia` | Canal de Denúncias | Qualquer | Cria o painel confidencial de Denúncias da Corregedoria |
+| `!setup-denuncia` | `🚨・fazer-denuncia` | Qualquer | Cria o painel de denúncias integradas ao Ministério Público |
+| `!setup-oab` | `inscrições-à-ordem` | Admin / Juiz / OAB | Cria o painel de Inscrições na OAB com formulário Modal |
+| `!secbase @user` | Canal `secbase` | Juiz / Corregedoria | Executa a varredura profunda no banco e gera o dossiê individual |
+| `!restringir @user` | Qualquer canal | Juiz / Corregedoria | Aplica medidas cautelares/restrições judiciais (mínimo, médio ou máximo) |
+| `!revogar-restricao` | Qualquer canal | Juiz / Corregedoria | Revoga as restrições judiciais e restaura as permissões do usuário |
+| `!restringir-cnpj` | Qualquer canal | Juiz / Corregedoria | Suspende comercialmente o CNPJ e notifica o tópico do Cartório |
+| `!revogar-cnpj` | Qualquer canal | Juiz / Corregedoria | Reabilita o registro comercial do CNPJ no Cartório |
+| `!restringir-oab` | Qualquer canal | Juiz / Corregedoria | Suspende a carteira da OAB, remove cargo de advogado e publica edital |
+| `!revogar-oab` | Qualquer canal | Juiz / Corregedoria | Restitui a licença da OAB e devolve o cargo @Adv. \| Advogado |
 | `!setup-mandado` | Canal de Mandados | Qualquer | Cria o painel de solicitação triangulada de mandados de prisão |
 | `!setup-comunicacao` | `comunicação-interna` | Qualquer | Cria o painel de mandados privativo no Governo Federal |
 | `!setup-repercussao` | `avisos-all-corps` | Qualquer | Cria o painel de Anúncios Gerais transmitidos para PM, PF e RONE |

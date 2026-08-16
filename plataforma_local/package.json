@@ -1,0 +1,16 @@
+{
+  "name": "discord-plataforma-local",
+  "version": "1.0.0",
+  "description": "Plataforma local para execução pontual de scripts e ações no Discord sem afetar a produção",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "exec": "node executar_snippet.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1"
+  }
+}

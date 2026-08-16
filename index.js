@@ -49,6 +49,239 @@ const privateIaResponses = new Map();
 // Controle de suspensão temporária de 1h para uso da IA fora do contexto do RP
 const iaBannedUsers = new Map();
 
+// --- SISTEMA DE RESTRIÇÕES JUDICIAIS E POLÍTICAS (!restringir) ---
+const JUDICIAL_RESTRICTIONS_PATH = path.resolve('banco_restricoes_judiciais.json');
+const judicialRestrictionsMap = new Map();
+
+function loadJudicialRestrictions() {
+  if (fs.existsSync(JUDICIAL_RESTRICTIONS_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(JUDICIAL_RESTRICTIONS_PATH, 'utf8'));
+      if (data && typeof data === 'object') {
+        Object.entries(data).forEach(([userId, info]) => {
+          judicialRestrictionsMap.set(userId, info);
+        });
+      }
+    } catch (e) {
+      console.error('[Restrições Judiciais] Erro ao carregar banco JSON:', e);
+    }
+  }
+}
+
+function saveJudicialRestrictions() {
+  try {
+    const obj = {};
+    judicialRestrictionsMap.forEach((info, userId) => {
+      obj[userId] = info;
+    });
+    fs.writeFileSync(JUDICIAL_RESTRICTIONS_PATH, JSON.stringify(obj, null, 2), 'utf8');
+  } catch (e) {
+    console.error('[Restrições Judiciais] Erro ao salvar banco JSON:', e);
+  }
+}
+
+loadJudicialRestrictions();
+
+// --- SISTEMA DE SUSPENSÃO DE CNPJ E OAB (!restringir-cnpj e !restringir-oab) ---
+const SUSPENDED_CNPJS_PATH = path.resolve('banco_cnpjs_suspensos.json');
+const suspendedCNPJsMap = new Map();
+
+const SUSPENDED_OAB_PATH = path.resolve('banco_oab_suspensas.json');
+const suspendedOABMap = new Map();
+
+function loadSuspendedCNPJs() {
+  if (fs.existsSync(SUSPENDED_CNPJS_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(SUSPENDED_CNPJS_PATH, 'utf8'));
+      if (data && typeof data === 'object') {
+        Object.entries(data).forEach(([cnpj, info]) => {
+          suspendedCNPJsMap.set(cnpj, info);
+        });
+      }
+    } catch (e) {
+      console.error('[CNPJ Suspenso] Erro ao carregar banco JSON:', e);
+    }
+  }
+}
+
+function saveSuspendedCNPJs() {
+  try {
+    const obj = {};
+    suspendedCNPJsMap.forEach((info, cnpj) => {
+      obj[cnpj] = info;
+    });
+    fs.writeFileSync(SUSPENDED_CNPJS_PATH, JSON.stringify(obj, null, 2), 'utf8');
+  } catch (e) {
+    console.error('[CNPJ Suspenso] Erro ao salvar banco JSON:', e);
+  }
+}
+
+function loadSuspendedOAB() {
+  if (fs.existsSync(SUSPENDED_OAB_PATH)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(SUSPENDED_OAB_PATH, 'utf8'));
+      if (data && typeof data === 'object') {
+        Object.entries(data).forEach(([userId, info]) => {
+          suspendedOABMap.set(userId, info);
+        });
+      }
+    } catch (e) {
+      console.error('[OAB Suspensa] Erro ao carregar banco JSON:', e);
+    }
+  }
+}
+
+function saveSuspendedOAB() {
+  try {
+    const obj = {};
+    suspendedOABMap.forEach((info, userId) => {
+      obj[userId] = info;
+    });
+    fs.writeFileSync(SUSPENDED_OAB_PATH, JSON.stringify(obj, null, 2), 'utf8');
+  } catch (e) {
+    console.error('[OAB Suspensa] Erro ao salvar banco JSON:', e);
+  }
+}
+
+loadSuspendedCNPJs();
+loadSuspendedOAB();
+
+async function applyJudicialRestriction(guild, targetMember, nivel, motivo, emissorUser) {
+  if (!guild || !targetMember) return { success: false, error: 'Membro ou servidor inválido.' };
+
+  const userId = targetMember.id;
+  const nivelClean = nivel.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+  if (!['minimo', 'medio', 'maximo'].includes(nivelClean)) {
+    return { success: false, error: 'Nível inválido. Escolha entre: minimo, medio ou maximo.' };
+  }
+
+  const allChannels = await guild.channels.fetch().catch(() => guild.channels.cache);
+  const channelsArray = safeGetArray(allChannels);
+
+  let affectedCount = 0;
+
+  for (const channel of channelsArray) {
+    if (!channel || channel.isThread()) continue;
+
+    const cName = channel.name.toLowerCase();
+    const parentCatName = channel.parent ? channel.parent.name.toLowerCase() : '';
+
+    const isExemptChannel = (
+      cName === '💬・chat' || cName === 'chat' || cName.includes('off-topic') || cName.includes('geral') ||
+      cName.includes('manual') || cName.includes('secbase') || cName.includes('regras') ||
+      cName.includes('ticket') || cName.includes('suporte') || cName.includes('atendimento')
+    );
+
+    if (isExemptChannel) continue;
+
+    let shouldRestrict = false;
+    let overwriteOptions = {};
+
+    if (nivelClean === 'minimo') {
+      const isCartorioOrOab = (
+        parentCatName.includes('cartório') || parentCatName.includes('cartorio') || parentCatName.includes('ordem dos advogados') || parentCatName.includes('oab') ||
+        cName.includes('contrato') || cName.includes('empresa') || cName.includes('escritorio') || cName.includes('escritório') ||
+        cName.includes('pessoa') || cName.includes('procura') || cName.includes('assinatura') || cName.includes('divida') || cName.includes('dívida')
+      );
+
+      if (isCartorioOrOab) {
+        shouldRestrict = true;
+        overwriteOptions = {
+          SendMessages: false,
+          CreatePublicThreads: false,
+          CreatePrivateThreads: false,
+          SendMessagesInThreads: false
+        };
+      }
+    } else if (nivelClean === 'medio') {
+      const isCartorioOrOab = (
+        parentCatName.includes('cartório') || parentCatName.includes('cartorio') || parentCatName.includes('ordem dos advogados') || parentCatName.includes('oab') ||
+        cName.includes('contrato') || cName.includes('empresa') || cName.includes('escritorio') || cName.includes('escritório') ||
+        cName.includes('pessoa') || cName.includes('procura') || cName.includes('assinatura') || cName.includes('divida') || cName.includes('dívida')
+      );
+
+      const isPolitical = (
+        cName.includes('eleição') || cName.includes('eleicao') || cName.includes('eleicoes') || cName.includes('eleições') ||
+        cName.includes('moção') || cName.includes('mocao') || cName.includes('moçoes') || cName.includes('moções') ||
+        cName.includes('assembleia') || cName.includes('plenario') || cName.includes('plenário') || cName.includes('candidatura') ||
+        cName.includes('filiac') || cName.includes('filiaç') || cName.includes('desfiliac') || cName.includes('desfiliaç') ||
+        cName.includes('servidores-partidarios') || cName.includes('servidores-partidários')
+      );
+
+      if (isCartorioOrOab || isPolitical) {
+        shouldRestrict = true;
+        overwriteOptions = {
+          ViewChannel: false,
+          SendMessages: false
+        };
+      }
+    } else if (nivelClean === 'maximo') {
+      const isProcessChannel = cName.includes('processo') || cName.includes('peticionamento') || cName.includes('audiencia') || cName.includes('audiência') || cName.includes('bnmp');
+      
+      if (!isProcessChannel) {
+        shouldRestrict = true;
+        overwriteOptions = {
+          ViewChannel: false,
+          SendMessages: false
+        };
+      }
+    }
+
+    if (shouldRestrict) {
+      await channel.permissionOverwrites.edit(userId, overwriteOptions, {
+        reason: `Medida Cautelar / Restrição Judicial (${nivelClean}) por ${emissorUser.tag}: ${motivo}`
+      }).catch(err => {
+        console.error(`[Restrição Judicial] Erro ao aplicar overwrite em #${channel.name}:`, err);
+      });
+      affectedCount++;
+    }
+  }
+
+  const record = {
+    userId: userId,
+    userTag: targetMember.user.tag,
+    userName: targetMember.displayName,
+    nivel: nivelClean,
+    motivo: motivo || 'Sem motivo especificado',
+    emissorId: emissorUser.id,
+    emissorTag: emissorUser.tag,
+    timestamp: getFormattedDateTime(),
+    affectedChannelsCount: affectedCount
+  };
+
+  judicialRestrictionsMap.set(userId, record);
+  saveJudicialRestrictions();
+
+  return { success: true, record: record, affectedCount: affectedCount };
+}
+
+async function removeJudicialRestriction(guild, targetMember, emissorUser) {
+  if (!guild || !targetMember) return { success: false, error: 'Membro ou servidor inválido.' };
+
+  const userId = targetMember.id;
+  const allChannels = await guild.channels.fetch().catch(() => guild.channels.cache);
+  const channelsArray = safeGetArray(allChannels);
+
+  let restoredCount = 0;
+
+  for (const channel of channelsArray) {
+    if (!channel || channel.isThread()) continue;
+
+    if (channel.permissionOverwrites && channel.permissionOverwrites.cache.has(userId)) {
+      await channel.permissionOverwrites.delete(userId, `Revogação de Medida Cautelar por ${emissorUser ? emissorUser.tag : 'Sistema'}`).catch(err => {
+        console.error(`[Restrição Judicial] Erro ao remover overwrite em #${channel.name}:`, err);
+      });
+      restoredCount++;
+    }
+  }
+
+  judicialRestrictionsMap.delete(userId);
+  saveJudicialRestrictions();
+
+  return { success: true, restoredCount: restoredCount };
+}
+
 // --- CONSTANTES E MAPAS DA CORREGEDORIA & TRIANGULAÇÃO ---
 const ROLE_CORREGEDORIA_NOME = '「CRRGD」・ Corregedoria Geral';
 const ROLE_CORP_NOME = '「CORP」Membro De Corporação';
@@ -282,6 +515,237 @@ async function getEntendimentosTribunalContext(guild, query = '') {
     : tribunalEntendimentosCache;
 
   return `\n\n--- BASE DE CONHECIMENTO & ENTENDIMENTOS OFICIAIS DO TRIBUNAL DE JUSTIÇA ---\n${safeText}`;
+}
+
+// HELPER PARA REPLICAR E DEPLOYA PARÂMETROS E PAINÉIS NO SERVIDOR DE BACKUP
+async function syncAndSetupBackupGuild(client) {
+  try {
+    const backupGuild = client.guilds.cache.get('1537356876163981312');
+    const govGuild = client.guilds.cache.get('1142251068890304522');
+
+    if (!backupGuild) {
+      console.log('[Backup Setup] Servidor de Backup (1537356876163981312) não localizado no cache.');
+      return;
+    }
+
+    console.log(`[Backup Setup] ⚙️ Iniciando varredura, clonagem e setup no servidor: ${backupGuild.name}...`);
+
+    const govChannels = govGuild ? await govGuild.channels.fetch().catch(() => govGuild.channels.cache) : null;
+    const backupChannels = await backupGuild.channels.fetch().catch(() => backupGuild.channels.cache);
+    const backupChannelsArray = safeGetArray(backupChannels);
+
+    // 1. REPLICAÇÃO DE CANAIS E FÓRUNS FALTANTES EM BACKUP
+    if (govChannels) {
+      const govCategories = safeGetArray(govChannels).filter(c => c && c.type === ChannelType.GuildCategory);
+      for (const govCat of govCategories) {
+        let bCat = backupChannelsArray.find(c => c && c.type === ChannelType.GuildCategory && c.name.trim().toLowerCase() === govCat.name.trim().toLowerCase());
+        if (!bCat) {
+          try {
+            bCat = await backupGuild.channels.create({
+              name: govCat.name,
+              type: ChannelType.GuildCategory
+            });
+            console.log(`[Backup Setup] Categoria criada em BACKUP: ${bCat.name}`);
+            backupChannelsArray.push(bCat);
+          } catch (e) {}
+        }
+
+        const govChildren = safeGetArray(govChannels).filter(c => c && c.parentId === govCat.id);
+        for (const child of govChildren) {
+          const existsInBackup = backupChannelsArray.some(bc => bc && bc.name.trim().toLowerCase() === child.name.trim().toLowerCase());
+          if (!existsInBackup) {
+            try {
+              const newChan = await backupGuild.channels.create({
+                name: child.name,
+                type: child.type,
+                parent: bCat ? bCat.id : null
+              });
+              console.log(`[Backup Setup] Canal criado em BACKUP: ${newChan.name} (Tipo: ${child.type})`);
+              backupChannelsArray.push(newChan);
+            } catch (e) {}
+          }
+        }
+      }
+    }
+
+    // 2. GARANTIA DE IMPLANTAÇÃO DOS PAINÉIS SISTÊMICOS DO GOVERNO FEDERAL EM BACKUP
+
+    // 2.1. PAINEL DE DENÚNCIAS (MINISTÉRIO PÚBLICO)
+    const chanDenuncia = backupChannelsArray.find(c => c && c.isTextBased() && (
+      matchChannel(c.name, 'fazer-denuncia') || matchChannel(c.name, 'fazer-denúncia') || matchChannel(c.name, 'denúncias') || matchChannel(c.name, 'denuncia')
+    ));
+
+    if (chanDenuncia) {
+      const msgs = await chanDenuncia.messages.fetch({ limit: 15 }).catch(() => null);
+      const hasPanel = msgs && Array.from(msgs.values()).some(m => m.embeds && m.embeds.some(e => e.title && e.title.includes('MINISTÉRIO PÚBLICO')));
+      if (!hasPanel) {
+        const denEmbed = new EmbedBuilder()
+          .setTitle('🚨 MINISTÉRIO PÚBLICO - CANAL DE DENÚNCIAS')
+          .setDescription(
+            `Bem-vindo ao canal oficial de denúncias do **Governo Federal e Poder Judiciário**.\n\n` +
+            `Clique no botão **🚨 Fazer Denúncia** abaixo para abrir um atendimento estritamente confidencial diretamente com os **Promotores de Justiça**.`
+          )
+          .setColor(0xc0392b)
+          .setFooter({ text: 'Ministério Público • Governo Federal' });
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId('btn_abrir_ticket_denuncia')
+            .setLabel('🚨 Fazer Denúncia')
+            .setStyle(ButtonStyle.Danger)
+        );
+
+        await chanDenuncia.send({ embeds: [denEmbed], components: [row] }).catch(() => null);
+        console.log('[Backup Setup] Painel de Denúncias implantado em BACKUP.');
+      }
+    }
+
+    // 2.2. PAINEL DE INSCRIÇÕES DA OAB
+    const chanOAB = backupChannelsArray.find(c => c && c.isTextBased() && (
+      matchChannel(c.name, 'inscrições-à-ordem') || matchChannel(c.name, 'inscricoes-a-ordem') || matchChannel(c.name, 'oab')
+    ));
+
+    if (chanOAB) {
+      const msgs = await chanOAB.messages.fetch({ limit: 15 }).catch(() => null);
+      const hasPanel = msgs && Array.from(msgs.values()).some(m => m.embeds && m.embeds.some(e => e.title && e.title.includes('ORDEM DOS ADVOGADOS')));
+      if (!hasPanel) {
+        const oabEmbed = new EmbedBuilder()
+          .setTitle('🏛️ ORDEM DOS ADVOGADOS DO BRASIL - INSCRIÇÃO & HABILITAÇÃO PROFISSIONAL')
+          .setDescription(
+            `Bem-vindo ao canal oficial de **Inscrição nos Quadros da OAB**.\n\n` +
+            `> ⚖️ **Habilitação Profissional**: Para exercer a advocacia regularmente e peticionar perante o Poder Judiciário do Governo Federal, é indispensável estar inscrito nesta Seccional.\n\n` +
+            `> 📋 **Instruções para Inscrição**:\n` +
+            `> 1. Clique no botão **"⚖️ Inscrever-se na OAB"** abaixo.\n` +
+            `> 2. Preencha o formulário oficial com seu **Nome On-RP**, **Matrícula/Registro Desejado** e **Comprovante/Formação**.\n` +
+            `> 3. Sua solicitação será encaminhada para a Comissão Avaliadora da Ordem para deferimento.`
+          )
+          .setColor(0x1a252f)
+          .setFooter({ text: 'Ordem dos Advogados do Brasil • Seccional Federal' })
+          .setTimestamp();
+
+        const oabRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId('btn_inscrever_oab')
+            .setLabel('⚖️ Inscrever-se na OAB')
+            .setStyle(ButtonStyle.Primary)
+        );
+
+        await chanOAB.send({ embeds: [oabEmbed], components: [oabRow] }).catch(() => null);
+        console.log('[Backup Setup] Painel da OAB implantado em BACKUP.');
+      }
+    }
+
+    // 2.3. PAINEL BNMP (MANDADOS DE PRISÃO)
+    const chanBNMP = backupChannelsArray.find(c => c && c.isTextBased() && (
+      matchChannel(c.name, 'bnmp-prisões') || matchChannel(c.name, 'bnmp-prisoes')
+    ));
+
+    if (chanBNMP) {
+      const msgs = await chanBNMP.messages.fetch({ limit: 15 }).catch(() => null);
+      const hasPanel = msgs && Array.from(msgs.values()).some(m => m.embeds && m.embeds.some(e => e.title && e.title.includes('BANCO NACIONAL DE MANDADOS')));
+      if (!hasPanel) {
+        const bnmpEmbed = new EmbedBuilder()
+          .setTitle('👮 BANCO NACIONAL DE MANDADOS DE PRISÃO (BNMP)')
+          .setDescription(
+            `Painel Institucional de Expedição e Monitoramento de Ordens Judiciais de Prisão.\n\n` +
+            `> 📜 **Mandados Judiciais**: Cadastramento oficial de decretos de prisão expedidos pela Magistratura.\n` +
+            `> 🚨 **Transmissão Externa**: Mandados ativos são replicados automaticamente aos canais da Polícia Federal e Corregedoria.`
+          )
+          .setColor(0x2c3e50)
+          .setFooter({ text: 'Conselho Nacional de Justiça • CNJ / BNMP' });
+
+        const bnmpRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('btn_bnmp_registrar').setLabel('Registrar novo Mandado').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('btn_bnmp_solicitar').setLabel('Solicitar prisão').setStyle(ButtonStyle.Secondary)
+        );
+
+        await chanBNMP.send({ embeds: [bnmpEmbed], components: [bnmpRow] }).catch(() => null);
+        console.log('[Backup Setup] Painel do BNMP implantado em BACKUP.');
+      }
+    }
+
+    // 2.4. PAINEL DE PRECATÓRIOS
+    const chanPrecatorios = backupChannelsArray.find(c => c && c.isTextBased() && (
+      matchChannel(c.name, 'emitir-precatórios') || matchChannel(c.name, 'emitir-precatorios')
+    ));
+
+    if (chanPrecatorios) {
+      const msgs = await chanPrecatorios.messages.fetch({ limit: 15 }).catch(() => null);
+      const hasPanel = msgs && Array.from(msgs.values()).some(m => m.embeds && m.embeds.some(e => e.title && e.title.includes('PRECATÓRIOS JUDICIAIS')));
+      if (!hasPanel) {
+        const precEmbed = new EmbedBuilder()
+          .setTitle('📜 SISTEMA NACIONAL DE PRECATÓRIOS JUDICIAIS')
+          .setDescription(
+            `Painel de Requisição de Pagamentos e Homologação de Títulos de Dívida Pública.\n\n` +
+            `Utilize o botão abaixo para expedir requisições de pagamento homologadas pelo Poder Judiciário.`
+          )
+          .setColor(0x8e44ad)
+          .setFooter({ text: 'Tribunal de Justiça • Gestão de Precatórios' });
+
+        const precRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('btn_precatorio_expedir').setLabel('⚡ Expedir Novo Precatório').setStyle(ButtonStyle.Success)
+        );
+
+        await chanPrecatorios.send({ embeds: [precEmbed], components: [precRow] }).catch(() => null);
+        console.log('[Backup Setup] Painel de Precatórios implantado em BACKUP.');
+      }
+    }
+
+    // 2.5. PAINEL DE COMUNICAÇÃO INTERNA
+    const chanCom = backupChannelsArray.find(c => c && c.isTextBased() && (
+      matchChannel(c.name, 'comunicação-interna') || matchChannel(c.name, 'comunicacao-interna')
+    ));
+
+    if (chanCom) {
+      const msgs = await chanCom.messages.fetch({ limit: 15 }).catch(() => null);
+      const hasPanel = msgs && Array.from(msgs.values()).some(m => m.embeds && m.embeds.some(e => e.title && e.title.includes('COMUNICAÇÃO INTERNA')));
+      if (!hasPanel) {
+        const comEmbed = new EmbedBuilder()
+          .setTitle('⚖️ PODER JUDICIÁRIO - SOLICITAÇÃO DE MANDADO DE PRISÃO (COMUNICAÇÃO INTERNA)')
+          .setDescription(
+            `Canal reservado de requisição de mandados entre o Governo Federal, Polícia Federal e Corregedoria.\n\n` +
+            `Clique no botão abaixo para abrir uma solicitação de mandado de prisão.`
+          )
+          .setColor(0x2c3e50);
+
+        const comRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('btn_solicitar_mandado_interno').setLabel('📜 Solicitar Expedição de Mandado').setStyle(ButtonStyle.Primary)
+        );
+
+        await chanCom.send({ embeds: [comEmbed], components: [comRow] }).catch(() => null);
+        console.log('[Backup Setup] Painel de Comunicação Interna implantado em BACKUP.');
+      }
+    }
+
+    // 2.6. PAINEL SECBASE
+    const chanSecbase = backupChannelsArray.find(c => c && c.isTextBased() && (
+      matchChannel(c.name, 'secbase')
+    ));
+
+    if (chanSecbase) {
+      const msgs = await chanSecbase.messages.fetch({ limit: 15 }).catch(() => null);
+      const hasPanel = msgs && Array.from(msgs.values()).some(m => m.embeds && m.embeds.some(e => e.title && e.title.includes('SECBASE')));
+      if (!hasPanel) {
+        const secEmbed = new EmbedBuilder()
+          .setTitle('🛡️ GABINETE DE INTELIGÊNCIA & SEGURANÇA - SECBASE')
+          .setDescription(
+            `Terminal de consulta e varredura do **Poder Judiciário**.\n\n` +
+            `Digite o comando abaixo para consultar dossiês de inteligência:\n` +
+            `\`!secbase @usuario\` ou \`!secbase <ID_do_Usuario>\``
+          )
+          .setColor(0x1a252f)
+          .setFooter({ text: 'Tribunal de Justiça • Sistema SECBASE' });
+
+        await chanSecbase.send({ embeds: [secEmbed] }).catch(() => null);
+        console.log('[Backup Setup] Terminal SECBASE implantado em BACKUP.');
+      }
+    }
+
+    console.log(`[Backup Setup] ✅ Sincronização e Setup do Servidor de Backup (${backupGuild.name}) concluídos com sucesso!`);
+
+  } catch (errBackupMaster) {
+    console.error('[Backup Setup] Erro ao sincronizar servidor de backup:', errBackupMaster);
+  }
 }
 
 // --- SISTEMA DE REGISTRO DE EMPRESAS E ESCRITÓRIOS (CARTÓRIO & OAB - CNPJ ÚNICO AUTOMÁTICO) ---
@@ -535,6 +999,30 @@ function safeGetArray(obj) {
   }
   
   return Object.values(obj);
+}
+
+// Helper universal para obter todos os posts/tópicos de qualquer canal (Texto ou Fórum)
+async function fetchAllPostsFromChannel(chan) {
+  const postsMap = new Map();
+  if (!chan || !chan.threads) return [];
+  try {
+    const active = await chan.threads.fetchActive().catch(() => null);
+    if (active && active.threads) {
+      const activeArr = safeGetArray(active.threads);
+      activeArr.forEach(t => { if (t && t.id) postsMap.set(t.id, t); });
+    }
+    const archPub = await chan.threads.fetchArchived({ type: 'public' }).catch(() => null);
+    if (archPub && archPub.threads) {
+      const archPubArr = safeGetArray(archPub.threads);
+      archPubArr.forEach(t => { if (t && t.id) postsMap.set(t.id, t); });
+    }
+    const archPriv = await chan.threads.fetchArchived({ type: 'private' }).catch(() => null);
+    if (archPriv && archPriv.threads) {
+      const archPrivArr = safeGetArray(archPriv.threads);
+      archPrivArr.forEach(t => { if (t && t.id) postsMap.set(t.id, t); });
+    }
+  } catch (e) {}
+  return Array.from(postsMap.values());
 }
 
 // Helper robusto para localizar o Embed Inicial de Autuação do Processo (independente de quantas mensagens a thread tenha)
@@ -1337,9 +1825,17 @@ client.once('ready', async () => {
       // 7. Módulo Cartório Registro de Empresas & Escritórios de Advocacia (CNPJs Únicos)
       try {
         await auditAndRegisterCompaniesAndLawOffices(guild);
-        logs.push(`  └─ 🏛️ [Cartório & OAB] Auditoria de empresas e escritórios concluída e CNPJs verificados.`);
+        logs.push(`  ├─ 🏛️ [Cartório & OAB] Auditoria de empresas e escritórios concluída e CNPJs verificados.`);
       } catch (e) {
-        logs.push(`  └─ ❌ [Cartório & OAB] Falha na auditoria de CNPJs: ${e.message}`);
+        logs.push(`  ├─ ❌ [Cartório & OAB] Falha na auditoria de CNPJs: ${e.message}`);
+      }
+
+      // 8. Sincronização e Implantação Automática do Servidor de Backup
+      try {
+        await syncAndSetupBackupGuild(client);
+        logs.push(`  └─ 🔄 [Servidor Backup] Estrutura e Painéis sincronizados no BACKUP GOV BR.`);
+      } catch (e) {
+        logs.push(`  └─ ❌ [Servidor Backup] Falha na sincronização: ${e.message}`);
       }
 
       console.log(logs.join('\n'));
@@ -1824,6 +2320,371 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  // COMANDO !SETUP-OAB (Painel de Inscrições na OAB)
+  if (contentLower.startsWith('!setup-oab')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+      const isAuthorized = isDrRenato || (authorMember && authorMember.roles.cache.some(r => {
+        const name = r.name.toLowerCase();
+        return name.includes('corregedoria') || name.includes('juiz') || name.includes('oab') || name.includes('advogad');
+      }));
+
+      if (!isAuthorized) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Administradores, Magistrados ou membros da OAB podem configurar o painel.').catch(() => null);
+        return;
+      }
+
+      const oabEmbed = new EmbedBuilder()
+        .setTitle('🏛️ ORDEM DOS ADVOGADOS DO BRASIL - INSCRIÇÃO & HABILITAÇÃO PROFISSIONAL')
+        .setDescription(
+          `Bem-vindo ao canal oficial de **Inscrição nos Quadros da OAB**.\n\n` +
+          `> ⚖️ **Habilitação Profissional**: Para exercer a advocacia regularmente e peticionar perante o Poder Judiciário do Governo Federal, é indispensável estar regularmente inscrito nesta Seccional.\n\n` +
+          `> 📋 **Instruções para Inscrição**:\n` +
+          `> 1. Clique no botão **"⚖️ Inscrever-se na OAB"** abaixo.\n` +
+          `> 2. Preencha o formulário oficial com seu **Nome On-RP**, **Matrícula/Registro Desejado** e **Comprovante/Formação**.\n` +
+          `> 3. Sua solicitação será encaminhada para a Comissão Avaliadora da Ordem para deferimento e atribuição do cargo.`
+        )
+        .setColor(0x1a252f)
+        .setFooter({ text: 'Ordem dos Advogados do Brasil • Seccional Federal' })
+        .setTimestamp();
+
+      const oabBtnRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('btn_inscrever_oab')
+          .setLabel('⚖️ Inscrever-se na OAB')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await message.channel.send({ embeds: [oabEmbed], components: [oabBtnRow] });
+      await message.reply('✅ **Painel de Inscrições da OAB enviado com sucesso!**').catch(() => null);
+    } catch (errOabSetup) {
+      console.error('[OAB Setup] Erro no comando !setup-oab:', errOabSetup);
+      await message.reply('❌ Ocorreu um erro ao enviar o painel da OAB.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !RESTRINGIR-CNPJ <CNPJ> [motivo]
+  if (contentLower.startsWith('!restringir-cnpj') || contentLower.startsWith('!suspender-cnpj')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+      const isAuthorized = isDrRenato || (authorMember && authorMember.roles.cache.some(r => {
+        const name = r.name.toLowerCase();
+        return name.includes('corregedoria') || name.includes('juiz') || name.includes('magistrad');
+      }));
+
+      if (!isAuthorized) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito e a Corregedoria-Geral podem suspender CNPJs.').catch(() => null);
+        return;
+      }
+
+      const args = message.content.trim().split(/\s+/).slice(1);
+      if (args.length < 1) {
+        await message.reply('⚠️ **Uso Incorreto:** Sintaxe: `!restringir-cnpj <CNPJ> [motivo]`').catch(() => null);
+        return;
+      }
+
+      const cnpjClean = args[0].trim();
+      const motivoArg = args.slice(1).join(' ') || 'Determinação Judicial / Irregularidade Fiscal ou Sanitária';
+
+      const record = {
+        cnpj: cnpjClean,
+        motivo: motivoArg,
+        emissorId: message.author.id,
+        emissorTag: message.author.tag,
+        timestamp: getFormattedDateTime()
+      };
+
+      suspendedCNPJsMap.set(cnpjClean, record);
+      saveSuspendedCNPJs();
+
+      let threadFound = null;
+      const allChannels = await message.guild.channels.fetch().catch(() => message.guild.channels.cache);
+      const channelsArray = safeGetArray(allChannels);
+
+      const cartorioChannels = channelsArray.filter(c => c && c.threads && (
+        c.name.toLowerCase().includes('empresa') || c.name.toLowerCase().includes('escritorio') || c.name.toLowerCase().includes('escritório')
+      ));
+
+      for (const chan of cartorioChannels) {
+        const posts = await fetchAllPostsFromChannel(chan);
+        for (const post of posts) {
+          const msgs = await post.messages.fetch({ limit: 10 }).catch(() => null);
+          const hasCNPJ = (post.name + ' ' + (msgs ? Array.from(msgs.values()).map(m => m.content).join(' ') : '')).includes(cnpjClean);
+
+          if (hasCNPJ) {
+            threadFound = post;
+            if (!post.name.includes('[SUSPENSO]')) {
+              await post.setName(`[SUSPENSO] ${post.name}`.substring(0, 100)).catch(() => null);
+            }
+            const alertEmbed = new EmbedBuilder()
+              .setTitle('🛑 REGISTRO DE CNPJ SUSPENSO PROVISORIAMENTE')
+              .setDescription(
+                `Avisamos que por determinação da Magistratura / Corregedoria, o registro desta pessoa jurídica (**CNPJ: \`${cnpjClean}\`**) foi **SUSPENSO PROVISORIAMENTE**.\n\n` +
+                `> 📋 **Motivação:** ${motivoArg}\n` +
+                `> ⚖️ **Efeito:** Fica vedada a emissão de novos contratos, notas ou atos comerciais durante a suspensão.\n` +
+                `> 🛡️ **Autoridade Emissora:** <@${message.author.id}>`
+              )
+              .setColor(0xc0392b)
+              .setTimestamp();
+
+            await post.send({ embeds: [alertEmbed] }).catch(() => null);
+            break;
+          }
+        }
+        if (threadFound) break;
+      }
+
+      const statusEmbed = new EmbedBuilder()
+        .setTitle('🛑 PODER JUDICIÁRIO - SUSPENSÃO DE CNPJ EXPEDIDA')
+        .setDescription(
+          `A suspensão do registro da empresa/escritório foi efetuada com sucesso.\n\n` +
+          `> 🏢 **CNPJ Sancionado:** \`${cnpjClean}\`\n` +
+          `> 📋 **Motivação:** ${motivoArg}\n` +
+          `> 📌 **Post no Cartório:** ${threadFound ? `<#${threadFound.id}>` : 'Post não localizado (Registro interno atualizado)'}\n` +
+          `> 🛡️ **Autoridade Emissora:** <@${message.author.id}>`
+        )
+        .setColor(0xc0392b)
+        .setFooter({ text: 'Junta Comercial & Cartório de Pessoas Jurídicas' })
+        .setTimestamp();
+
+      await message.reply({ embeds: [statusEmbed] }).catch(() => null);
+    } catch (errRestringirCNPJ) {
+      console.error('[CNPJ] Erro no comando !restringir-cnpj:', errRestringirCNPJ);
+      await message.reply('❌ Ocorreu um erro ao suspender o CNPJ.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !REVOGAR-CNPJ <CNPJ>
+  if (contentLower.startsWith('!revogar-cnpj') || contentLower.startsWith('!desrestringir-cnpj')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+      const isAuthorized = isDrRenato || (authorMember && authorMember.roles.cache.some(r => {
+        const name = r.name.toLowerCase();
+        return name.includes('corregedoria') || name.includes('juiz') || name.includes('magistrad');
+      }));
+
+      if (!isAuthorized) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito e a Corregedoria-Geral podem reabilitar CNPJs.').catch(() => null);
+        return;
+      }
+
+      const args = message.content.trim().split(/\s+/).slice(1);
+      if (args.length < 1) {
+        await message.reply('⚠️ **Uso Incorreto:** Sintaxe: `!revogar-cnpj <CNPJ>`').catch(() => null);
+        return;
+      }
+
+      const cnpjClean = args[0].trim();
+      suspendedCNPJsMap.delete(cnpjClean);
+      saveSuspendedCNPJs();
+
+      let threadFound = null;
+      const allChannels = await message.guild.channels.fetch().catch(() => message.guild.channels.cache);
+      const channelsArray = safeGetArray(allChannels);
+
+      const cartorioChannels = channelsArray.filter(c => c && c.threads && (
+        c.name.toLowerCase().includes('empresa') || c.name.toLowerCase().includes('escritorio') || c.name.toLowerCase().includes('escritório')
+      ));
+
+      for (const chan of cartorioChannels) {
+        const posts = await fetchAllPostsFromChannel(chan);
+        for (const post of posts) {
+          if (post.name.includes(cnpjClean) || post.name.includes('[SUSPENSO]')) {
+            threadFound = post;
+            const newName = post.name.replace('[SUSPENSO]', '').trim();
+            await post.setName(newName).catch(() => null);
+
+            const alertEmbed = new EmbedBuilder()
+              .setTitle('🔓 REGISTRO DE CNPJ REABILITADO')
+              .setDescription(
+                `Avisamos que por determinação judicial, a suspensão deste **CNPJ (\`${cnpjClean}\`)** foi **OFICIALMENTE REVOGADA**.\n\n` +
+                `> 🟢 **Status:** Registro Comercial Ativo & Regularizado\n` +
+                `> 🛡️ **Autoridade Emissora:** <@${message.author.id}>`
+              )
+              .setColor(0x2ecc71)
+              .setTimestamp();
+
+            await post.send({ embeds: [alertEmbed] }).catch(() => null);
+            break;
+          }
+        }
+        if (threadFound) break;
+      }
+
+      const statusEmbed = new EmbedBuilder()
+        .setTitle('🔓 PODER JUDICIÁRIO - CNPJ REABILITADO')
+        .setDescription(
+          `A revogação da suspensão do CNPJ foi concluída com sucesso.\n\n` +
+          `> 🏢 **CNPJ Reabilitado:** \`${cnpjClean}\`\n` +
+          `> 📌 **Post no Cartório:** ${threadFound ? `<#${threadFound.id}>` : 'Registro atualizado'}\n` +
+          `> 🛡️ **Autoridade Emissora:** <@${message.author.id}>`
+        )
+        .setColor(0x2ecc71)
+        .setTimestamp();
+
+      await message.reply({ embeds: [statusEmbed] }).catch(() => null);
+    } catch (errRevogarCNPJ) {
+      console.error('[CNPJ] Erro no comando !revogar-cnpj:', errRevogarCNPJ);
+      await message.reply('❌ Ocorreu um erro ao revogar a suspensão do CNPJ.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !RESTRINGIR-OAB <@advogado|ID> [motivo]
+  if (contentLower.startsWith('!restringir-oab') || contentLower.startsWith('!suspender-oab')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+      const isAuthorized = isDrRenato || (authorMember && authorMember.roles.cache.some(r => {
+        const name = r.name.toLowerCase();
+        return name.includes('corregedoria') || name.includes('juiz') || name.includes('magistrad');
+      }));
+
+      if (!isAuthorized) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito e a Corregedoria-Geral podem suspender licenças de OAB.').catch(() => null);
+        return;
+      }
+
+      const args = message.content.trim().split(/\s+/).slice(1);
+      if (args.length < 1) {
+        await message.reply('⚠️ **Uso Incorreto:** Sintaxe: `!restringir-oab @advogado [motivo]`').catch(() => null);
+        return;
+      }
+
+      const targetMention = message.mentions.users.first();
+      let targetId = targetMention ? targetMention.id : args[0].replace(/[<@!>]/g, '');
+
+      const targetMember = await message.guild.members.fetch(targetId).catch(() => null);
+      if (!targetMember) {
+        await message.reply('❌ **Usuário não encontrado:** Menzione o advogado ou informe um ID válido.').catch(() => null);
+        return;
+      }
+
+      const motivoArg = args.slice(1).join(' ') || 'Determinação Judicial / Infrações Ético-Disciplinares';
+
+      const advRoles = targetMember.roles.cache.filter(r => {
+        const n = r.name.toLowerCase();
+        return n.includes('advogad') || n.includes('oab');
+      });
+
+      const removedRoleNames = advRoles.map(r => r.name).join(', ') || 'Nenhum cargo ativo encontrado';
+      for (const r of advRoles.values()) {
+        await targetMember.roles.remove(r).catch(() => null);
+      }
+
+      const record = {
+        userId: targetMember.id,
+        userTag: targetMember.user.tag,
+        userName: targetMember.displayName,
+        motivo: motivoArg,
+        rolesRemovidos: removedRoleNames,
+        emissorId: message.author.id,
+        emissorTag: message.author.tag,
+        timestamp: getFormattedDateTime()
+      };
+
+      suspendedOABMap.set(targetMember.id, record);
+      saveSuspendedOAB();
+
+      const oabAlertEmbed = new EmbedBuilder()
+        .setTitle('🛑 EDITAL OFICIAL - SUSPENSÃO DE INSCRIÇÃO DA OAB')
+        .setDescription(
+          `Certificamos que por ordem judicial da Magistratura / Corregedoria, a licença e inscrição na OAB do profissional abaixo foram **OFICIALMENTE SUSPENSAS**.\n\n` +
+          `> 👤 **Advogado Sancionado:** <@${targetMember.id}> (\`${targetMember.user.tag}\`)\n` +
+          `> 📋 **Fundamentação:** ${motivoArg}\n` +
+          `> ⚖️ **Efeitos:** Fica vedada a petição de ações, defesa em audiências e abertura de tickets jurídicos.\n` +
+          `> 🛡️ **Autoridade Emissora:** <@${message.author.id}>`
+        )
+        .setColor(0xc0392b)
+        .setFooter({ text: 'Ordem dos Advogados do Brasil • Seccional Federal' })
+        .setTimestamp();
+
+      await message.reply({ embeds: [oabAlertEmbed] }).catch(() => null);
+    } catch (errRestringirOAB) {
+      console.error('[OAB] Erro no comando !restringir-oab:', errRestringirOAB);
+      await message.reply('❌ Ocorreu um erro ao suspender a OAB do profissional.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !REVOGAR-OAB <@advogado|ID>
+  if (contentLower.startsWith('!revogar-oab') || contentLower.startsWith('!desrestringir-oab')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+      const isAuthorized = isDrRenato || (authorMember && authorMember.roles.cache.some(r => {
+        const name = r.name.toLowerCase();
+        return name.includes('corregedoria') || name.includes('juiz') || name.includes('magistrad');
+      }));
+
+      if (!isAuthorized) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito e a Corregedoria-Geral podem reabilitar inscrições da OAB.').catch(() => null);
+        return;
+      }
+
+      const args = message.content.trim().split(/\s+/).slice(1);
+      if (args.length < 1) {
+        await message.reply('⚠️ **Uso Incorreto:** Sintaxe: `!revogar-oab @advogado`').catch(() => null);
+        return;
+      }
+
+      const targetMention = message.mentions.users.first();
+      let targetId = targetMention ? targetMention.id : args[0].replace(/[<@!>]/g, '');
+
+      const targetMember = await message.guild.members.fetch(targetId).catch(() => null);
+      if (!targetMember) {
+        await message.reply('❌ **Usuário não encontrado:** Menzione o advogado ou informe um ID válido.').catch(() => null);
+        return;
+      }
+
+      suspendedOABMap.delete(targetMember.id);
+      saveSuspendedOAB();
+
+      const advRole = message.guild.roles.cache.find(r => r.name.toLowerCase().includes('advogad') || r.name.toLowerCase().includes('oab'));
+      if (advRole) {
+        await targetMember.roles.add(advRole).catch(() => null);
+      }
+
+      const oabRevokeEmbed = new EmbedBuilder()
+        .setTitle('🔓 CERTIDÃO DE REABILITAÇÃO PROFISSIONAL - OAB')
+        .setDescription(
+          `Certificamos que por ordem judicial, a suspensão da inscrição na OAB do profissional <@${targetMember.id}> foi **REVOGADA**.\n\n` +
+          `> 👤 **Advogado Reabilitado:** <@${targetMember.id}> (\`${targetMember.user.tag}\`)\n` +
+          `> 🟢 **Status:** Licença Restabelecida e Habilitação Profissional Ativa\n` +
+          `> 🛡️ **Autoridade Emissora:** <@${message.author.id}>`
+        )
+        .setColor(0x2ecc71)
+        .setFooter({ text: 'Ordem dos Advogados do Brasil • Seccional Federal' })
+        .setTimestamp();
+
+      await message.reply({ embeds: [oabRevokeEmbed] }).catch(() => null);
+    } catch (errRevogarOAB) {
+      console.error('[OAB] Erro no comando !revogar-oab:', errRevogarOAB);
+      await message.reply('❌ Ocorreu um erro ao reabilitar a OAB do profissional.').catch(() => null);
+    }
+    return;
+  }
+
   // COMANDO !GLOBO (Envio de mensagem formatada para Tupper no canal 💬・chat)
   if (content.toLowerCase().startsWith('!globo')) {
     const textArg = content.slice(6).trim();
@@ -1922,6 +2783,625 @@ client.on('messageCreate', async (message) => {
     } catch (errSetup) {
       console.error('[Denúncia Setup] Erro ao configurar botão de denúncia:', errSetup);
       await message.reply('❌ Ocorreu um erro ao configurar o botão de denúncia. Verifique os logs.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !SETUP-BACKUP OU !SINCRONIZAR-BACKUP
+  if (contentLower.startsWith('!setup-backup') || contentLower.startsWith('!sincronizar-backup')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+      const isAuthorized = isDrRenato || (authorMember && authorMember.roles.cache.some(r => {
+        const name = r.name.toLowerCase();
+        return name.includes('corregedoria') || name.includes('juiz') || name.includes('magistrad') || name.includes('admin');
+      }));
+
+      if (!isAuthorized) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito e Administradores podem sincronizar o servidor de Backup.').catch(() => null);
+        return;
+      }
+
+      const progressMsg = await message.reply('⏳ **Gabinete do Governo:** Varrendo o servidor principal, replicando categorias/fóruns e implantando painéis institucionais no **BACKUP GOV BR**...').catch(() => null);
+
+      await syncAndSetupBackupGuild(message.client);
+
+      if (progressMsg) {
+        await progressMsg.edit({ content: '✅ **Sincronização Concluída!** A estrutura de categorias, canais fórum, permissões e todos os painéis institucionais foram implantados com sucesso no **BACKUP GOV BR**!' }).catch(() => null);
+      }
+    } catch (errCmdBackup) {
+      console.error('Erro ao executar !setup-backup:', errCmdBackup);
+      await message.reply('❌ Ocorreu um erro ao sincronizar o servidor de Backup.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !SETUP-SECBASE
+  if (contentLower.startsWith('!setup-secbase')) {
+    try {
+      if (typeof deleteCommandMessage === 'function') {
+        await deleteCommandMessage().catch(() => {});
+      }
+
+      const tribunalCat = await getOrCreateTribunalCategory(message.guild);
+      const channels = await message.guild.channels.fetch().catch(() => message.guild.channels.cache);
+      const channelsArray = safeGetArray(channels);
+
+      let secbaseChannel = channelsArray.find(c => 
+        c && c.isTextBased() && (
+          c.name.toLowerCase().includes('secbase') ||
+          matchChannel(c.name, 'secbase')
+        )
+      );
+
+      if (!secbaseChannel) {
+        const roles = await message.guild.roles.fetch().catch(() => message.guild.roles.cache);
+        const rolesArray = safeGetArray(roles);
+        const juizRole = rolesArray.find(r => r && r.name && (
+          r.name.toLowerCase().includes('juiz') ||
+          r.name.toLowerCase().includes('magistrad') ||
+          r.name.toLowerCase().includes('corregedoria')
+        ));
+
+        const overwrites = [
+          {
+            id: message.guild.roles.everyone.id,
+            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.EmbedLinks]
+          },
+          {
+            id: client.user.id,
+            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks, PermissionFlagsBits.ReadMessageHistory]
+          }
+        ];
+
+        secbaseChannel = await message.guild.channels.create({
+          name: '🔍・secbase',
+          type: ChannelType.GuildText,
+          parent: tribunalCat ? tribunalCat.id : null,
+          permissionOverwrites: overwrites,
+          reason: 'Canal público de inteligência judicial SECBASE'
+        });
+      }
+
+      const welcomeEmbed = new EmbedBuilder()
+        .setTitle('🛡️ GABINETE DE INTELIGÊNCIA & SEGURANÇA - SECBASE')
+        .setDescription(
+          `Bem-vindo ao terminal de consulta e varredura do **Poder Judiciário**.\n\n` +
+          `📝 **Como Utilizar:**\n` +
+          `Digite o comando abaixo mencionando o cidadão ou autoridade sob consulta:\n` +
+          `\`!secbase @usuario\` ou \`!secbase <ID_do_Usuario>\`\n\n` +
+          `🌐 **Acesso Público:** Este canal e as varreduras produzidas estão disponíveis para consulta por todos os cidadãos e membros do Governo.`
+        )
+        .setColor(0x1a252f)
+        .setFooter({ text: 'Tribunal de Justiça • Sistema SECBASE' })
+        .setTimestamp();
+
+      await secbaseChannel.send({ embeds: [welcomeEmbed] });
+      await message.reply(`✅ **Canal SECBASE configurado com sucesso:** <#${secbaseChannel.id}>`).catch(() => null);
+    } catch (errSecbaseSetup) {
+      console.error('[SECBASE Setup] Erro ao criar canal secbase:', errSecbaseSetup);
+      await message.reply('❌ Ocorreu um erro ao configurar o canal SECBASE.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !RESTRINGIR <@usuario|ID> <minimo|medio|maximo> [motivo]
+  if (contentLower.startsWith('!restringir') || contentLower.startsWith('!restricao')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+      const isAuthorized = isDrRenato || (authorMember && authorMember.roles.cache.some(r => {
+        const name = r.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        return name.includes('corregedoria') || name.includes('juiz') || name.includes('magistrad');
+      }));
+
+      if (!isAuthorized) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito, Magistrados e a Corregedoria-Geral podem expedir Medidas Cautelares / Restrições Judiciais.').catch(() => null);
+        return;
+      }
+
+      const args = message.content.trim().split(/\s+/).slice(1);
+      if (args.length < 2) {
+        await message.reply('⚠️ **Uso Incorreto:** Sintaxe: `!restringir @usuario <minimo|medio|maximo> [motivo]`').catch(() => null);
+        return;
+      }
+
+      const targetMention = message.mentions.users.first();
+      let targetId = targetMention ? targetMention.id : args[0].replace(/[<@!>]/g, '');
+
+      const targetMember = await message.guild.members.fetch(targetId).catch(() => null);
+      if (!targetMember) {
+        await message.reply('❌ **Usuário não encontrado:** Certifique-se de mencionar o usuário ou informar um ID válido.').catch(() => null);
+        return;
+      }
+
+      const nivelArg = args[1].toLowerCase();
+      const motivoArg = args.slice(2).join(' ') || 'Determinação Judicial / Medida Cautelar da Magistratura';
+
+      const progressMsg = await message.reply(`⏳ **Poder Judiciário:** Aplicando restrição judicial nível **${nivelArg.toUpperCase()}** para <@${targetMember.id}>...`).catch(() => null);
+
+      const result = await applyJudicialRestriction(message.guild, targetMember, nivelArg, motivoArg, message.author);
+
+      if (!result.success) {
+        if (progressMsg) await progressMsg.edit({ content: `❌ **Erro:** ${result.error}` }).catch(() => null);
+        return;
+      }
+
+      const statusEmbed = new EmbedBuilder()
+        .setTitle('🛑 PODER JUDICIÁRIO - MEDIDA CAUTELAR / RESTRIÇÃO EXPEDIDA')
+        .setDescription(
+          `Certificamos que por ordem da Magistratura / Corregedoria, foi aplicada uma **Restrição Judicial On-RP** ao cidadão.\n\n` +
+          `> 👤 **Cidadão Sancionado:** <@${targetMember.id}> (\`${targetMember.user.tag}\`)\n` +
+          `> ⚖️ **Nível da Sanção:** \`${nivelArg.toUpperCase()}\`\n` +
+          `> 📋 **Motivação / Fundamentação:** ${motivoArg}\n` +
+          `> 📁 **Canais Afetados:** ${result.affectedCount} canais institucionais ajustados\n` +
+          `> 🛡️ **Autoridade Emissora:** <@${message.author.id}>`
+        )
+        .setColor(nivelArg === 'maximo' ? 0xc0392b : (nivelArg === 'medio' ? 0xe67e22 : 0xf1c40f))
+        .setFooter({ text: 'Tribunal de Justiça • Ordem Judicial de Cumprimento Imperativo' })
+        .setTimestamp();
+
+      if (progressMsg) {
+        await progressMsg.edit({ content: `✅ **Medida Cautelar aplicada com sucesso para <@${targetMember.id}>!**`, embeds: [statusEmbed] }).catch(() => null);
+      } else {
+        await message.reply({ embeds: [statusEmbed] }).catch(() => null);
+      }
+
+    } catch (errRestringir) {
+      console.error('[Restrições Judiciais] Erro no comando !restringir:', errRestringir);
+      await message.reply('❌ Ocorreu um erro interno ao expedir a restrição judicial.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !REVOGAR-RESTRICAO ou !DESRESTRINGIR
+  if (contentLower.startsWith('!revogar-restricao') || contentLower.startsWith('!desrestringir')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+      const isAuthorized = isDrRenato || (authorMember && authorMember.roles.cache.some(r => {
+        const name = r.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        return name.includes('corregedoria') || name.includes('juiz') || name.includes('magistrad');
+      }));
+
+      if (!isAuthorized) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes de Direito, Magistrados e a Corregedoria-Geral podem revogar Restrições Judiciais.').catch(() => null);
+        return;
+      }
+
+      const args = message.content.trim().split(/\s+/).slice(1);
+      if (args.length < 1) {
+        await message.reply('⚠️ **Uso Incorreto:** Sintaxe: `!revogar-restricao @usuario`').catch(() => null);
+        return;
+      }
+
+      const targetMention = message.mentions.users.first();
+      let targetId = targetMention ? targetMention.id : args[0].replace(/[<@!>]/g, '');
+
+      const targetMember = await message.guild.members.fetch(targetId).catch(() => null);
+      if (!targetMember) {
+        await message.reply('❌ **Usuário não encontrado:** Certifique-se de mencionar o usuário ou informar um ID válido.').catch(() => null);
+        return;
+      }
+
+      const progressMsg = await message.reply(`⏳ **Poder Judiciário:** Revogando restrição judicial para <@${targetMember.id}>...`).catch(() => null);
+
+      const result = await removeJudicialRestriction(message.guild, targetMember, message.author);
+
+      const revokeEmbed = new EmbedBuilder()
+        .setTitle('🔓 PODER JUDICIÁRIO - MEDIDA CAUTELAR REVOGADA')
+        .setDescription(
+          `Certificamos que por ordem judicial, a **Restrição Judicial On-RP** aplicada a <@${targetMember.id}> foi **OFICIALMENTE REVOGADA**.\n\n` +
+          `> 👤 **Cidadão Reabilitado:** <@${targetMember.id}> (\`${targetMember.user.tag}\`)\n` +
+          `> 📂 **Canais Restaurados:** ${result.restoredCount} canais com permissões originais restauradas\n` +
+          `> 🛡️ **Autoridade Emissora:** <@${message.author.id}>`
+        )
+        .setColor(0x2ecc71)
+        .setFooter({ text: 'Tribunal de Justiça • Decisão de Reabilitação' })
+        .setTimestamp();
+
+      if (progressMsg) {
+        await progressMsg.edit({ content: `✅ **Restrição revogada com sucesso para <@${targetMember.id}>!**`, embeds: [revokeEmbed] }).catch(() => null);
+      } else {
+        await message.reply({ embeds: [revokeEmbed] }).catch(() => null);
+      }
+
+    } catch (errRevogar) {
+      console.error('[Restrições Judiciais] Erro no comando !revogar-restricao:', errRevogar);
+      await message.reply('❌ Ocorreu um erro interno ao revogar a restrição judicial.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !SECBASE <@usuario | ID | nome>
+  if (contentLower.startsWith('!secbase')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+      const isAuthorized = isDrRenato || (authorMember && authorMember.roles.cache.some(r => {
+        const name = r.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        return name.includes('corregedoria') || name.includes('juiz') || name.includes('magistrad');
+      }));
+
+      if (!isAuthorized) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas Juízes, Magistrados e membros da Corregedoria possuem credenciais para executar varreduras no SECBASE.').catch(() => null);
+        return;
+      }
+
+      const targetUser = message.mentions.users.first();
+      let targetMember = null;
+      let targetId = null;
+
+      const args = message.content.trim().split(/\s+/).slice(1);
+      const queryParam = args.join(' ').trim();
+
+      if (targetUser) {
+        targetId = targetUser.id;
+        targetMember = await message.guild.members.fetch(targetId).catch(() => null);
+      } else if (queryParam) {
+        const cleanId = queryParam.replace(/[<@!>]/g, '');
+        if (/^\d{17,20}$/.test(cleanId)) {
+          targetMember = await message.guild.members.fetch(cleanId).catch(() => null);
+          if (targetMember) targetId = targetMember.user.id;
+        } else {
+          const members = await message.guild.members.fetch({ query: queryParam, limit: 5 }).catch(() => null);
+          if (members && members.size > 0) {
+            targetMember = members.first();
+            targetId = targetMember.user.id;
+          }
+        }
+      }
+
+      if (!targetId || !targetMember) {
+        await message.reply('⚠️ **Uso Incorreto:** Sintaxe: `!secbase @usuario` ou `!secbase <ID_do_usuario>`').catch(() => null);
+        return;
+      }
+
+      const target = targetMember.user;
+      const progressMsg = await message.reply(`🔍 **SECBASE:** Iniciando varredura profunda no banco de dados para <@${target.id}>...`).catch(() => null);
+
+      const allChannels = await message.guild.channels.fetch().catch(() => message.guild.channels.cache);
+      const channelsArray = safeGetArray(allChannels);
+
+      const targetUserLower = target.username.toLowerCase();
+      const targetNickLower = targetMember.displayName.toLowerCase();
+      const targetWords = [
+        target.id,
+        targetUserLower,
+        targetNickLower,
+        ...targetNickLower.split(/\s+/).filter(w => w.length >= 3 && !['dr.', 'dra.', 'adv.', 'adv', 'de', 'da', 'do', 'dos', 'das'].includes(w))
+      ];
+
+      function isMatchTarget(text) {
+        if (!text) return false;
+        const textLow = text.toLowerCase();
+        return targetWords.some(word => textLow.includes(word));
+      }
+
+      // 1. Cargo On-RP & Roles no Governo Federal
+      const rpRoles = targetMember.roles.cache
+        .filter(r => r.name !== '@everyone')
+        .map(r => r.name)
+        .join(', ') || 'Nenhum cargo atribuído';
+
+      // 1.1. Varredura de Roles em Corporações Externa (Polícia Federal, PM, RONE)
+      const corpRolesFound = [];
+
+      for (const g of client.guilds.cache.values()) {
+        // Ignora o servidor atual (GOV) e o servidor de Backup (1537356876163981312)
+        if (g.id === message.guild.id || g.id === '1537356876163981312' || g.name.toUpperCase().includes('BACKUP')) {
+          continue;
+        }
+
+        try {
+          const extMember = await g.members.fetch(target.id).catch(() => null);
+          if (extMember) {
+            const memberRoles = extMember.roles.cache
+              .filter(r => r.name !== '@everyone')
+              .map(r => r.name)
+              .join(', ');
+
+            if (memberRoles) {
+              corpRolesFound.push(`• **${g.name}**: ${memberRoles}`);
+            } else {
+              corpRolesFound.push(`• **${g.name}**: *Membro cadastrado (Sem cargos específicos)*`);
+            }
+          }
+        } catch (e) {}
+      }
+
+      const formattedCorpRoles = corpRolesFound.length > 0
+        ? corpRolesFound.join('\n')
+        : '⚪ Nenhum vínculo corporativo registrado nas Forças Policiais (PF, PM, RONE)';
+
+      // 2. Cartório - Contratos & Atos Jurídicos (Canais Fórum/Texto: 'contratos', 'procurações', etc)
+      const contratosFound = [];
+      const contratosChannels = channelsArray.filter(c => 
+        c && c.threads && (
+          matchChannel(c.name, 'contratos') ||
+          matchChannel(c.name, 'procurações') ||
+          matchChannel(c.name, 'procuracoes') ||
+          c.name.toLowerCase().includes('contrato')
+        )
+      );
+
+      for (const chan of contratosChannels) {
+        const posts = await fetchAllPostsFromChannel(chan);
+        for (const post of posts) {
+          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          if (!matched) {
+            const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
+            if (msgs) {
+              for (const m of msgs.values()) {
+                if (isMatchTarget(m.content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+                  matched = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (matched) {
+            contratosFound.push(`• **${post.name}** - <#${post.id}> ([Acessar Post](${post.url}))`);
+          }
+        }
+      }
+
+      // 3. Cartório - Registro de Empresas & Pessoas Jurídicas ('registro-de-empresas', 'empresas')
+      const empFound = [];
+      const empChannels = channelsArray.filter(c => 
+        c && c.threads && (
+          matchChannel(c.name, 'registro-de-empresas') ||
+          matchChannel(c.name, 'empresas') ||
+          c.name.toLowerCase().includes('empresa')
+        )
+      );
+
+      for (const chan of empChannels) {
+        const posts = await fetchAllPostsFromChannel(chan);
+        for (const post of posts) {
+          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          let cnpjStr = '';
+          const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
+          if (msgs) {
+            for (const m of msgs.values()) {
+              const content = m.content || '';
+              if (isMatchTarget(content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+                matched = true;
+              }
+              const cnpjMatch = (content + ' ' + JSON.stringify(m.embeds || [])).match(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/g);
+              if (cnpjMatch) cnpjStr = cnpjMatch[0];
+            }
+          }
+          if (matched) {
+            empFound.push(`• **${post.name}** ${cnpjStr ? `(CNPJ: \`${cnpjStr}\`)` : ''} - <#${post.id}> ([Acessar Post](${post.url}))`);
+          }
+        }
+      }
+
+      // 4. Cartório - Registro Civil & Atos Pessoais ('registro-de-pessoas', 'registro-de-assinaturas', 'dívidas-e-outros', etc)
+      const civilFound = [];
+      const civilChannels = channelsArray.filter(c => 
+        c && c.threads && (
+          matchChannel(c.name, 'registro-de-pessoas') ||
+          matchChannel(c.name, 'registro-de-assinaturas') ||
+          matchChannel(c.name, 'dividas-e-outros') ||
+          matchChannel(c.name, 'dívidas-e-outros') ||
+          matchChannel(c.name, 'servidores-partidarios') ||
+          matchChannel(c.name, 'servidores-partidários') ||
+          matchChannel(c.name, 'filiações') ||
+          matchChannel(c.name, 'filiacoes') ||
+          matchChannel(c.name, 'desfiliações') ||
+          matchChannel(c.name, 'desfiliacoes')
+        )
+      );
+
+      for (const chan of civilChannels) {
+        const posts = await fetchAllPostsFromChannel(chan);
+        for (const post of posts) {
+          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          if (!matched) {
+            const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
+            if (msgs) {
+              for (const m of msgs.values()) {
+                if (isMatchTarget(m.content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+                  matched = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (matched) {
+            civilFound.push(`• **${post.name}** - <#${post.id}> ([Acessar Post](${post.url}))`);
+          }
+        }
+      }
+
+      // 5. Escritórios de Advocacia & Registros OAB ('escritórios', 'escritorios')
+      const lawOfficesFound = [];
+      const officeChannels = channelsArray.filter(c => 
+        c && c.threads && (
+          matchChannel(c.name, 'escritorios') ||
+          matchChannel(c.name, 'escritórios') ||
+          c.name.toLowerCase().includes('escritório') ||
+          c.name.toLowerCase().includes('escritorio') ||
+          c.name.toLowerCase().includes('advocacia')
+        )
+      );
+
+      for (const chan of officeChannels) {
+        const posts = await fetchAllPostsFromChannel(chan);
+        for (const post of posts) {
+          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          let cnpjStr = '';
+          const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
+          if (msgs) {
+            for (const m of msgs.values()) {
+              const content = m.content || '';
+              if (isMatchTarget(content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+                matched = true;
+              }
+              const cnpjMatch = (content + ' ' + JSON.stringify(m.embeds || [])).match(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/g);
+              if (cnpjMatch) cnpjStr = cnpjMatch[0];
+            }
+          }
+          if (matched) {
+            lawOfficesFound.push(`• **${post.name}** ${cnpjStr ? `(CNPJ: \`${cnpjStr}\`)` : ''} - <#${post.id}> ([Acessar Post](${post.url}))`);
+          }
+        }
+      }
+
+      // 6. Processos Judiciais & Peticionamento
+      const processList = [];
+      const judChannels = channelsArray.filter(c =>
+        c && c.threads && (
+          matchChannel(c.name, 'peticionamento') ||
+          matchChannel(c.name, 'processos') ||
+          matchChannel(c.name, 'intimacoes') ||
+          matchChannel(c.name, 'comunicacao-interna')
+        )
+      );
+
+      for (const jChan of judChannels) {
+        const posts = await fetchAllPostsFromChannel(jChan);
+        for (const post of posts) {
+          let matched = post.ownerId === target.id || isMatchTarget(post.name);
+          if (!matched) {
+            const msgs = await post.messages.fetch({ limit: 15 }).catch(() => null);
+            if (msgs) {
+              for (const m of msgs.values()) {
+                if (isMatchTarget(m.content) || (m.embeds && m.embeds.some(e => isMatchTarget(JSON.stringify(e))))) {
+                  matched = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (matched) {
+            processList.push(`• **${post.name}** - <#${post.id}> ([Acessar Processo](${post.url}))`);
+          }
+        }
+      }
+
+      // 7. Varredura Mensagem por Mensagem no Canal BNMP-PRISÕES
+      const bnmpEntries = [];
+      const bnmpChannels = channelsArray.filter(c =>
+        c && c.isTextBased() && (
+          matchChannel(c.name, 'bnmp-prisoes') ||
+          matchChannel(c.name, 'bnmp-prisões') ||
+          c.name.toLowerCase().includes('bnmp') ||
+          c.name.toLowerCase().includes('prisões') ||
+          c.name.toLowerCase().includes('prisoes')
+        )
+      );
+
+      for (const bnmpChan of bnmpChannels) {
+        const fetchedMsgs = await bnmpChan.messages.fetch({ limit: 100 }).catch(() => null);
+        if (fetchedMsgs) {
+          fetchedMsgs.forEach(m => {
+            const fullContentUpper = (
+              (m.content || '') + ' ' + 
+              (m.embeds ? m.embeds.map(e => `${e.title || ''} ${e.description || ''} ${e.fields ? e.fields.map(f => `${f.name}: ${f.value}`).join(' ') : ''}`).join(' ') : '')
+            ).toUpperCase();
+
+            if (isMatchTarget(fullContentUpper)) {
+              let title = 'Registro de Mandado no BNMP';
+              if (m.embeds && m.embeds.length > 0 && m.embeds[0].title) {
+                title = m.embeds[0].title;
+              }
+              const descSnippet = m.embeds && m.embeds[0] && m.embeds[0].description 
+                ? m.embeds[0].description.replace(/\n+/g, ' ').substring(0, 120) 
+                : (m.content ? m.content.replace(/\n+/g, ' ').substring(0, 120) : 'Mandado de Prisão');
+
+              bnmpEntries.push(`• **${title}**: ${descSnippet}... ([Ver Mensagem](${m.url}))`);
+            }
+          });
+        }
+
+        const posts = await fetchAllPostsFromChannel(bnmpChan);
+        for (const post of posts) {
+          if (post.ownerId === target.id || isMatchTarget(post.name)) {
+            bnmpEntries.push(`• **Solicitação/Thread de Prisão**: <#${post.id}> - ${post.name}`);
+          }
+        }
+      }
+
+      for (const w of openWarrants) {
+        if ((w.nome && isMatchTarget(w.nome)) || (w.motivo && isMatchTarget(w.motivo))) {
+          const alreadyAdded = bnmpEntries.some(e => e.includes(w.id));
+          if (!alreadyAdded) {
+            bnmpEntries.push(`• **Mandado Ativo ${w.id}**: ${w.motivo} (Expedido por: ${w.emissor})`);
+          }
+        }
+      }
+
+      const formattedWarrants = bnmpEntries.length > 0
+        ? bnmpEntries.slice(0, 10).join('\n')
+        : '🟢 Nenhum mandado ou registro de prisão encontrado no canal BNMP';
+
+      const formattedContratos = contratosFound.length > 0
+        ? contratosFound.slice(0, 10).join('\n')
+        : '⚪ Nenhum contrato ou ato jurídico localizado';
+
+      const formattedCompanies = empFound.length > 0
+        ? empFound.slice(0, 10).join('\n')
+        : '⚪ Nenhuma empresa comercial registrada';
+
+      const formattedCivil = civilFound.length > 0
+        ? civilFound.slice(0, 10).join('\n')
+        : '⚪ Nenhum registro civil ou assentamento localizado';
+
+      const formattedOffices = lawOfficesFound.length > 0
+        ? lawOfficesFound.slice(0, 10).join('\n')
+        : '⚪ Nenhum escritório de advocacia vinculado';
+
+      const formattedProcesses = processList.length > 0
+        ? processList.slice(0, 10).join('\n')
+        : '⚪ Nenhuma citação processual ativa localizada';
+
+      // --- EMBED DOSSIÊ SECBASE ---
+      const secbaseEmbed = new EmbedBuilder()
+        .setTitle('🛡️ GABINETE DE INTELIGÊNCIA & SEGURANÇA - SECBASE')
+        .setDescription(
+          `**DOSSIÊ DE INTELIGÊNCIA INDIVIDUAL**\n` +
+          `> **Alvo:** <@${target.id}> (\`${target.tag}\`)\n` +
+          `> **ID Discord:** \`${target.id}\`\n` +
+          `> **Data de Ingresso:** ${targetMember.joinedAt ? targetMember.joinedAt.toLocaleDateString('pt-BR') : 'Não informada'}`
+        )
+        .addFields(
+          { name: '👤 Cargos & Habilitações no Governo Federal', value: rpRoles.length > 1024 ? rpRoles.substring(0, 1000) + '...' : rpRoles },
+          { name: '🎖️ Vínculos & Cargos nas Corporações (PF, PM & RONE)', value: formattedCorpRoles.length > 1024 ? formattedCorpRoles.substring(0, 1000) + '...' : formattedCorpRoles },
+          { name: '📜 Cartório - Contratos & Instrumentos', value: formattedContratos },
+          { name: '🏛️ Escritórios de Advocacia & Registros OAB', value: formattedOffices },
+          { name: '🏢 Cartório - Registro de Empresas (PJs)', value: formattedCompanies },
+          { name: '📄 Cartório - Registro Civil & Atos Pessoais', value: formattedCivil },
+          { name: '⚖️ Processos & Citações Judiciais', value: formattedProcesses },
+          { name: '🚨 Ficha Criminal / BNMP', value: formattedWarrants }
+        )
+        .setColor(0x1a252f)
+        .setFooter({ text: 'Poder Judiciário • SECBASE | Relatório de Inteligência' })
+        .setTimestamp();
+
+      if (progressMsg) {
+        await progressMsg.edit({ content: `✅ **Varredura concluída para <@${target.id}>!**`, embeds: [secbaseEmbed] }).catch(() => null);
+      } else {
+        await message.reply({ embeds: [secbaseEmbed] }).catch(() => null);
+      }
+
+    } catch (errSecbase) {
+      console.error('[SECBASE] Erro ao executar varredura:', errSecbase);
+      await message.reply('❌ Ocorreu um erro interno ao processar a varredura SECBASE.').catch(() => null);
     }
     return;
   }
@@ -4488,6 +5968,55 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isModalSubmit()) {
+    // PROCESSAMENTO DO MODAL DE INSCRIÇÃO DA OAB
+    if (interaction.customId === 'modal_inscricao_oab') {
+      try {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+        const nomeRp = interaction.fields.getTextInputValue('oab_nome_rp');
+        const matricula = interaction.fields.getTextInputValue('oab_matricula');
+        const formacao = interaction.fields.getTextInputValue('oab_formacao');
+
+        const reqEmbed = new EmbedBuilder()
+          .setTitle('⚖️ SOLICITAÇÃO DE INSCRIÇÃO NA OAB')
+          .setDescription(
+            `Nova solicitação de inscrição enviada para análise e deferimento da Magistratura.\n\n` +
+            `> 👤 **Candidato:** <@${interaction.user.id}> (\`${interaction.user.tag}\`)\n` +
+            `> 📜 **Nome On-RP:** ${nomeRp}\n` +
+            `> 🪪 **Matrícula/Registro:** \`${matricula}\`\n` +
+            `> 🎓 **Formação/Diploma:** ${formacao}`
+          )
+          .setColor(0x3498db)
+          .setFooter({ text: 'Ordem dos Advogados do Brasil • Análise Judiciária de Inscrição' })
+          .setTimestamp();
+
+        const evalRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`btn_deferir_oab_${interaction.user.id}`)
+            .setLabel('✅ Deferir Inscrição (Atribuir Cargo)')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`btn_indeferir_oab_${interaction.user.id}`)
+            .setLabel('❌ Indeferir Inscrição')
+            .setStyle(ButtonStyle.Danger)
+        );
+
+        await interaction.channel.send({
+          content: `🔔 **Nova Inscrição Pendente:** <@${interaction.user.id}> enviou requerimento de inscrição na OAB.`,
+          embeds: [reqEmbed],
+          components: [evalRow]
+        });
+
+        await interaction.editReply({
+          content: `✅ **Solicitação de Inscrição enviada com sucesso!** Aguarde a avaliação da Magistratura neste canal.`
+        });
+      } catch (errModalSubmitOAB) {
+        console.error('Erro ao processar modal submit OAB:', errModalSubmitOAB);
+        await interaction.editReply({ content: '❌ Ocorreu um erro ao enviar sua inscrição.' }).catch(() => null);
+      }
+      return;
+    }
+
     if (interaction.customId === 'modal_oficio') {
       try {
         await interaction.deferReply().catch(() => null);
@@ -4885,6 +6414,139 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (interaction.isButton()) {
+    // BOTÃO DE INSCRIÇÃO NA OAB (PAINEL)
+    if (interaction.customId === 'btn_inscrever_oab') {
+      try {
+        const userId = interaction.user.id;
+
+        if (suspendedOABMap.has(userId)) {
+          await interaction.reply({
+            content: '🛑 **Acesso Negado:** Sua licença profissional da OAB está atualmente **SUSPENSA** por determinação judicial/corregedoria.',
+            ephemeral: true
+          }).catch(() => null);
+          return;
+        }
+
+        const modal = new ModalBuilder()
+          .setCustomId('modal_inscricao_oab')
+          .setTitle('Inscrição nos Quadros da OAB');
+
+        const nameInput = new TextInputBuilder()
+          .setCustomId('oab_nome_rp')
+          .setLabel('Nome Completo On-RP')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Ex: Dr. Bernardo Silva')
+          .setRequired(true);
+
+        const regInput = new TextInputBuilder()
+          .setCustomId('oab_matricula')
+          .setLabel('Matrícula / Registro Desejado')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Ex: OAB/PR 45.892')
+          .setRequired(true);
+
+        const formInput = new TextInputBuilder()
+          .setCustomId('oab_formacao')
+          .setLabel('Faculdade / Diploma / Comprovante')
+          .setStyle(TextInputStyle.Paragraph)
+          .setPlaceholder('Informe a universidade de graduação ou exame')
+          .setRequired(true);
+
+        const row1 = new ActionRowBuilder().addComponents(nameInput);
+        const row2 = new ActionRowBuilder().addComponents(regInput);
+        const row3 = new ActionRowBuilder().addComponents(formInput);
+
+        modal.addComponents(row1, row2, row3);
+
+        await interaction.showModal(modal);
+      } catch (errOabModal) {
+        console.error('Erro ao exibir modal de inscrição OAB:', errOabModal);
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({ content: '❌ Ocorreu um erro ao abrir o formulário de inscrição.', ephemeral: true }).catch(() => null);
+        }
+      }
+      return;
+    }
+
+    // BOTÃO DE DEFERIR/INDEFERIR INSCRIÇÃO DA OAB (JUÍZES, PRES. OAB & VICE-PRES. OAB)
+    if (interaction.customId.startsWith('btn_deferir_oab_') || interaction.customId.startsWith('btn_indeferir_oab_')) {
+      try {
+        const isDefer = interaction.customId.startsWith('btn_deferir_oab_');
+        const targetUserId = interaction.customId.replace(isDefer ? 'btn_deferir_oab_' : 'btn_indeferir_oab_', '');
+
+        const member = interaction.member;
+        const usernameLower = interaction.user.username.toLowerCase();
+        const displayNameLower = member?.displayName?.toLowerCase() || '';
+
+        const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+        const isAuthorized = isDrRenato || (member && member.roles.cache.some(r => {
+          const rawName = r.name.trim();
+          const nameLower = rawName.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+          const isJudge = (nameLower.includes('juiz') || nameLower.includes('magistrad')) && !nameLower.includes('promotor');
+          const isOabPresident = rawName === 'Pres. OAB | Presidente da Ordem dos Advogados do Brasil' || nameLower.includes('presidente da ordem') || nameLower.includes('pres. oab');
+          const isOabVicePresident = rawName === 'Vice-Pres. OAB | Vice-Presidente da Ordem dos Advogados do Brasil' || nameLower.includes('vice-presidente da ordem') || nameLower.includes('vice-pres. oab');
+
+          return isJudge || isOabPresident || isOabVicePresident;
+        }));
+
+        if (!isAuthorized) {
+          await interaction.reply({
+            content: '⚠️ **Acesso Negado:** Apenas **Juízes de Direito**, o **Presidente da OAB** (`Pres. OAB | Presidente da Ordem dos Advogados do Brasil`) ou o **Vice-Presidente da OAB** (`Vice-Pres. OAB | Vice-Presidente da Ordem dos Advogados do Brasil`) possuem competência para deferir ou indeferir habilitações.',
+            ephemeral: true
+          }).catch(() => null);
+          return;
+        }
+
+        await interaction.deferUpdate().catch(() => null);
+
+        const targetMember = await interaction.guild.members.fetch(targetUserId).catch(() => null);
+
+        if (isDefer) {
+          if (targetMember) {
+            const roles = await interaction.guild.roles.fetch().catch(() => interaction.guild.roles.cache);
+            const rolesArray = safeGetArray(roles);
+            
+            // Busca o cargo exato 'Adv. | Advogado' (evitando 'Advogado da União')
+            let advRole = rolesArray.find(r => r && r.name.trim() === 'Adv. | Advogado');
+            if (!advRole) {
+              advRole = rolesArray.find(r => r && r.name.toLowerCase().includes('adv.') && r.name.toLowerCase().includes('advogado'));
+            }
+            if (!advRole) {
+              advRole = rolesArray.find(r => r && r.name.toLowerCase().includes('advogado') && !r.name.toLowerCase().includes('união') && !r.name.toLowerCase().includes('uniao'));
+            }
+
+            if (advRole) {
+              await targetMember.roles.add(advRole).catch(() => null);
+            }
+          }
+
+          const approvedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+            .setTitle('✅ INSCRIÇÃO NA OAB DEFERIDA & HABILITADA')
+            .setColor(0x2ecc71);
+
+          await interaction.message.edit({
+            content: `🎉 **Inscrição Deferida:** A habilitação profissional de <@${targetUserId}> foi **APROVADA** e o cargo **Adv. | Advogado** foi atribuído por <@${interaction.user.id}>!`,
+            embeds: [approvedEmbed],
+            components: []
+          });
+        } else {
+          const rejectedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+            .setTitle('❌ INSCRIÇÃO NA OAB INDEFERIDA')
+            .setColor(0xe74c3c);
+
+          await interaction.message.edit({
+            content: `❌ **Inscrição Indeferida:** O requerimento de <@${targetUserId}> foi **INDEFERIDO** por <@${interaction.user.id}>.`,
+            embeds: [rejectedEmbed],
+            components: []
+          });
+        }
+      } catch (errEvalOAB) {
+        console.error('Erro ao avaliar inscrição da OAB:', errEvalOAB);
+      }
+      return;
+    }
+
     // BOTÃO DE SOLICITAÇÃO DE ADVOGADO (TICKET ADVOCACIA)
     if (interaction.customId === 'btn_abrir_ticket_advogado') {
       try {

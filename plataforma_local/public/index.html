@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plataforma Local - Executor de Bot Discord</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  
+  <style>
+    :root {
+      --bg-dark: #0f111a;
+      --bg-card: #181b29;
+      --bg-editor: #121420;
+      --border-color: #2a2e45;
+      --accent-purple: #7289da;
+      --accent-cyan: #00d2ff;
+      --accent-green: #00e676;
+      --accent-red: #ff5252;
+      --accent-yellow: #ffd600;
+      --text-main: #e2e8f0;
+      --text-muted: #94a3b8;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* HEADER */
+    header {
+      background: rgba(24, 27, 41, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-color);
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .brand-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, #5865F2, #7289da);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      box-shadow: 0 4px 15px rgba(88, 101, 242, 0.4);
+    }
+
+    .brand-text h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      background: linear-gradient(90deg, #ffffff, #94a3b8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-text p {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #111422;
+      border: 1px solid var(--border-color);
+      padding: 0.4rem 0.9rem;
+      border-radius: 20px;
+      font-size: 0.82rem;
+      font-weight: 500;
+    }
+
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background-color: var(--text-muted);
+    }
+
+    .status-dot.online {
+      background-color: var(--accent-green);
+      box-shadow: 0 0 10px var(--accent-green);
+    }
+
+    .status-dot.error {
+      background-color: var(--accent-red);
+      box-shadow: 0 0 10px var(--accent-red);
+    }
+
+    .btn-config {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: all 0.2s;
+    }
+
+    .btn-config:hover {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: var(--accent-purple);
+    }
+
+    /* MAIN CONTAINER */
+    main {
+      flex: 1;
+      padding: 1.5rem 2rem;
+      max-width: 1600px;
+      width: 100%;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+
+    @media (max-width: 1024px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* CARD STYLING */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+    }
+
+    .card-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .card-body {
+      padding: 1.25rem;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    /* CODE EDITOR */
+    .template-select {
+      width: 100%;
+      background: var(--bg-editor);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 0.65rem 1rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .template-select:focus {
+      border-color: var(--accent-purple);
+    }
+
+    .editor-container {
+      position: relative;
+      flex: 1;
+      min-height: 380px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    textarea#codeEditor {
+      width: 100%;
+      height: 100%;
+      min-height: 380px;
+      background: var(--bg-editor);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      color: #f8f8f2;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.88rem;
+      line-height: 1.5;
+      padding: 1rem;
+      resize: vertical;
+      outline: none;
+      tab-size: 2;
+    }
+
+    textarea#codeEditor:focus {
+      border-color: var(--accent-purple);
+      box-shadow: 0 0 0 2px rgba(114, 137, 218, 0.2);
+    }
+
+    .actions-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-top: 0.5rem;
+    }
+
+    .btn-execute {
+      background: linear-gradient(135deg, #5865F2, #4752C4);
+      color: white;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      transition: all 0.2s;
+      box-shadow: 0 4px 15px rgba(88, 101, 242, 0.4);
+    }
+
+    .btn-execute:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(88, 101, 242, 0.6);
+    }
+
+    .btn-execute:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .btn-clear {
+      background: transparent;
+      border: 1px solid var(--border-color);
+      color: var(--text-muted);
+      padding: 0.6rem 1rem;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+
+    .btn-clear:hover {
+      color: var(--text-main);
+      border-color: var(--text-muted);
+    }
+
+    /* CONSOLE LOG TERMINAL */
+    .terminal {
+      background: #090a10;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.83rem;
+      padding: 1rem;
+      flex: 1;
+      min-height: 380px;
+      max-height: 520px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .log-line {
+      display: flex;
+      gap: 0.5rem;
+      line-height: 1.4;
+      word-break: break-all;
+    }
+
+    .log-line.log { color: #e2e8f0; }
+    .log-line.info { color: var(--accent-cyan); }
+    .log-line.warn { color: var(--accent-yellow); }
+    .log-line.error { color: var(--accent-red); }
+
+    .log-tag {
+      font-weight: 600;
+      font-size: 0.75rem;
+      padding: 0.1rem 0.3rem;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .result-box {
+      background: rgba(0, 230, 118, 0.05);
+      border: 1px solid rgba(0, 230, 118, 0.2);
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.82rem;
+      color: var(--accent-green);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* CONFIG MODAL */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(5px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+
+    .modal-overlay.active {
+      display: flex;
+    }
+
+    .modal {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 500px;
+      padding: 1.5rem;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+    }
+
+    .modal-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      margin-bottom: 1rem;
+    }
+
+    .form-group label {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+
+    .form-group input {
+      background: var(--bg-editor);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 0.65rem 0.85rem;
+      color: var(--text-main);
+      font-size: 0.88rem;
+      outline: none;
+    }
+
+    .form-group input:focus {
+      border-color: var(--accent-purple);
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="brand-icon">⚡</div>
+      <div class="brand-text">
+        <h1>Plataforma Local Discord</h1>
+        <p>Executor Único de Actions & Code Snippets</p>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 1rem;">
+      <div class="status-badge" id="statusBadge">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">Verificando...</span>
+      </div>
+
+      <button class="btn-config" id="openConfigBtn">⚙️ Configurações</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- CARD ESQUERDA: EDITOR -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">📝 Editor de Snippet Assíncrono</div>
+      </div>
+      <div class="card-body">
+        <select class="template-select" id="templateSelect">
+          <option value="">-- Carregar Template de Ação Rápida --</option>
+        </select>
+
+        <div class="editor-container">
+          <textarea id="codeEditor" placeholder="// Escreva seu código discord.js aqui...&#10;// Variáveis disponíveis no escopo: client, guild, EmbedBuilder, ActionRowBuilder, console&#10;&#10;console.log('Testando conexão com servidor:', guild.name);&#10;return { servidor: guild.name, membros: guild.memberCount };"></textarea>
+        </div>
+
+        <div class="actions-bar">
+          <button class="btn-clear" id="clearEditorBtn">Limpar Editor</button>
+          <button class="btn-execute" id="executeBtn">
+            <span>🚀 Executar Código (Uma Vez)</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- CARD DIREITA: CONSOLE OUTPUT -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">🖥️ Console de Logs & Resultado</div>
+        <button class="btn-clear" id="clearConsoleBtn">Limpar Console</button>
+      </div>
+      <div class="card-body">
+        <div class="terminal" id="terminal">
+          <div class="log-line info">
+            <span class="log-tag">INFO</span>
+            <span>Aguardando execução do snippet...</span>
+          </div>
+        </div>
+
+        <div id="resultContainer" style="display: none;">
+          <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.3rem;">Retorno da Execução:</div>
+          <div class="result-box" id="resultBox"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- MODAL CONFIGURAÇÕES -->
+  <div class="modal-overlay" id="configModal">
+    <div class="modal">
+      <div class="modal-title">⚙️ Configurações da Plataforma</div>
+      <div class="form-group">
+        <label for="discordToken">DISCORD_TOKEN (Bot Token):</label>
+        <input type="password" id="discordToken" placeholder="MTAx..." />
+      </div>
+      <div class="form-group">
+        <label for="guildId">GUILD_ID (ID do Servidor Principal):</label>
+        <input type="text" id="guildId" placeholder="114225..." />
+      </div>
+      <div class="modal-actions">
+        <button class="btn-clear" id="closeConfigBtn">Cancelar</button>
+        <button class="btn-execute" id="saveConfigBtn">Salvar Configurações</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let templatesData = [];
+
+    // Carregar Status
+    async function checkStatus() {
+      const statusDot = document.getElementById('statusDot');
+      const statusText = document.getElementById('statusText');
+
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        if (data.connected) {
+          statusDot.className = 'status-dot online';
+          statusText.textContent = `${data.bot.tag} (${data.guild.name})`;
+        } else {
+          statusDot.className = 'status-dot error';
+          statusText.textContent = data.message || 'Desconectado';
+        }
+      } catch (e) {
+        statusDot.className = 'status-dot error';
+        statusText.textContent = 'Erro ao verificar status';
+      }
+    }
+
+    // Carregar Templates
+    async function loadTemplates() {
+      try {
+        const res = await fetch('/api/templates');
+        const data = await res.json();
+        templatesData = data.templates || [];
+
+        const select = document.getElementById('templateSelect');
+        select.innerHTML = '<option value="">-- Carregar Template de Ação Rápida --</option>';
+        templatesData.forEach(t => {
+          const opt = document.createElement('option');
+          opt.value = t.id;
+          opt.textContent = `${t.name}`;
+          select.appendChild(opt);
+        });
+      } catch (e) {
+        console.error("Erro ao carregar templates:", e);
+      }
+    }
+
+    // Seleção de Template
+    document.getElementById('templateSelect').addEventListener('change', (e) => {
+      const selectedId = e.target.value;
+      if (!selectedId) return;
+      const t = templatesData.find(x => x.id === selectedId);
+      if (t) {
+        document.getElementById('codeEditor').value = t.code;
+      }
+    });
+
+    // Limpar Editor
+    document.getElementById('clearEditorBtn').addEventListener('click', () => {
+      document.getElementById('codeEditor').value = '';
+    });
+
+    // Limpar Console
+    document.getElementById('clearConsoleBtn').addEventListener('click', () => {
+      document.getElementById('terminal').innerHTML = '';
+      document.getElementById('resultContainer').style.display = 'none';
+    });
+
+    // Modal Config
+    const configModal = document.getElementById('configModal');
+    document.getElementById('openConfigBtn').addEventListener('click', () => configModal.classList.add('active'));
+    document.getElementById('closeConfigBtn').addEventListener('click', () => configModal.classList.remove('active'));
+
+    // Salvar Config
+    document.getElementById('saveConfigBtn').addEventListener('click', async () => {
+      const token = document.getElementById('discordToken').value;
+      const guildId = document.getElementById('guildId').value;
+
+      try {
+        await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, guildId })
+        });
+        configModal.classList.remove('active');
+        checkStatus();
+      } catch (e) {
+        alert('Erro ao salvar configuração: ' + e.message);
+      }
+    });
+
+    // EXECUTAR CÓDIGO SNIPPET
+    document.getElementById('executeBtn').addEventListener('click', async () => {
+      const code = document.getElementById('codeEditor').value;
+      const executeBtn = document.getElementById('executeBtn');
+      const terminal = document.getElementById('terminal');
+      const resultContainer = document.getElementById('resultContainer');
+      const resultBox = document.getElementById('resultBox');
+
+      if (!code.trim()) {
+        alert("Por favor, digite um código ou escolha um template para executar.");
+        return;
+      }
+
+      executeBtn.disabled = true;
+      executeBtn.innerHTML = '<span>⏳ Executando...</span>';
+
+      // Log inicial no terminal
+      const startLine = document.createElement('div');
+      startLine.className = 'log-line info';
+      startLine.innerHTML = `<span class="log-tag">EXEC</span><span>Iniciando execução em ${new Date().toLocaleTimeString()}...</span>`;
+      terminal.appendChild(startLine);
+      terminal.scrollTop = terminal.scrollHeight;
+
+      try {
+        const res = await fetch('/api/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code })
+        });
+
+        const data = await res.json();
+
+        // Renderiza Logs
+        if (data.logs && data.logs.length > 0) {
+          data.logs.forEach(l => {
+            const line = document.createElement('div');
+            line.className = `log-line ${l.type}`;
+            line.innerHTML = `<span class="log-tag">${l.type.toUpperCase()}</span><span>${escapeHtml(l.text)}</span>`;
+            terminal.appendChild(line);
+          });
+        }
+
+        if (data.success) {
+          const endLine = document.createElement('div');
+          endLine.className = 'log-line info';
+          endLine.innerHTML = `<span class="log-tag" style="background: rgba(0,230,118,0.2); color: #00e676;">OK</span><span>Execução concluída com sucesso em ${data.durationMs}ms</span>`;
+          terminal.appendChild(endLine);
+
+          if (data.result !== null && data.result !== undefined) {
+            resultContainer.style.display = 'block';
+            resultBox.textContent = typeof data.result === 'object' ? JSON.stringify(data.result, null, 2) : String(data.result);
+          }
+        } else {
+          const errLine = document.createElement('div');
+          errLine.className = 'log-line error';
+          errLine.innerHTML = `<span class="log-tag">FALHA</span><span>Erro: ${escapeHtml(data.error)}</span>`;
+          terminal.appendChild(errLine);
+        }
+      } catch (err) {
+        const errLine = document.createElement('div');
+        errLine.className = 'log-line error';
+        errLine.innerHTML = `<span class="log-tag">ERRO</span><span>Erro de comunicação: ${escapeHtml(err.message)}</span>`;
+        terminal.appendChild(errLine);
+      } finally {
+        executeBtn.disabled = false;
+        executeBtn.innerHTML = '<span>🚀 Executar Código (Uma Vez)</span>';
+        terminal.scrollTop = terminal.scrollHeight;
+        checkStatus();
+      }
+    });
+
+    function escapeHtml(text) {
+      return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // Inicialização
+    checkStatus();
+    loadTemplates();
+  </script>
+</body>
+</html>
