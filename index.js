@@ -4815,9 +4815,13 @@ async function runPetitionWizard(thread, authorId, modalData) {
                                  `**COMANDOS BÁSICOS DO PROCESSO**\n` +
                                  `*Guia de utilização nos autos*\n\n` +
                                  `• **\`!partes\`** - Vincular ou alterar as partes envolvidas (Autor / Réu).\n` +
+                                 `• **\`!secbase @usuario\`** - Dossiê de Inteligência, Varredura no Banco de Dados e Cartório.\n` +
                                  `• **\`!ia <pergunta>\`** - Consultar a IA Assistente (análise jurídica e resumos).\n` +
                                  `• **\`!autos-sigilosos\`** - Abrir sala privativa reservada para documentos sigilosos.\n\n` +
-                                 `**Comandos da Magistratura (Juízes de Direito):**\n` +
+                                 `**Comandos da Magistratura & Autoridades:**\n` +
+                                 `• **\`!secbase @usuario\`** - Dossiê de Inteligência e Histórico de Bens/CNPJs.\n` +
+                                 `• **\`!restringir @usuario <minimo|medio|maximo>\`** - Expedir Medidas Cautelares / Restrições Judiciais.\n` +
+                                 `• **\`!revogar-restricao @usuario\`** - Revogar restrições judiciais do cidadão.\n` +
                                  `• **\`!oficio\`** - Expedir Ofício Judicial / Ato Ordinatório.\n` +
                                  `• **\`!intimar\`** - Expedir intimação judicial via DM.\n` +
                                  `• **\`!segredo\`** - Decretar Segredo de Justiça no processo.\n` +
