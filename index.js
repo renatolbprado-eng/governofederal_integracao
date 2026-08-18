@@ -671,6 +671,255 @@ TEXTO BRUTO FORNECIDO PELO MAGISTRADO:
   };
 }
 
+// MAPA DE CONTROLE DE AVISOS PARA NÃO REPETIR ALERTAS DE OFÍCIO NA MESMA THREAD ANTES DE 7 DIAS
+const lastAlertedOficioMap = new Map();
+
+async function runJudicialReminderSystem(client) {
+  console.log('[Sistema de Lembretes] ⚙️ Iniciando varredura semanal/inicialização dos Módulos A, B e C...');
+  try {
+    const mainGuild = client.guilds.cache.get('1142251068890304522') || client.guilds.cache.first();
+    if (!mainGuild) return;
+
+    // Busca o ID do Dr. Renato no servidor
+    const members = await mainGuild.members.fetch().catch(() => mainGuild.members.cache);
+    const membersArray = safeGetArray(members);
+    
+    let drRenatoMember = membersArray.find(m => {
+      const uLow = m.user.username.toLowerCase();
+      const dLow = m.displayName.toLowerCase();
+      return uLow.includes('renat') || dLow.includes('renat');
+    });
+
+    const drRenatoMention = drRenatoMember ? `<@${drRenatoMember.id}>` : '@Juiz de Direito';
+
+    const allChannels = await mainGuild.channels.fetch().catch(() => mainGuild.channels.cache);
+    const channelsArray = safeGetArray(allChannels);
+
+    // =========================================================================
+    // MÓDULO A: PROCESSOS COM !OFICIO SEM MOVIMENTAÇÃO HÁ MAIS DE 2 DIAS (48H)
+    // =========================================================================
+    const processChannels = channelsArray.filter(c => 
+      c && c.threads && (
+        matchChannel(c.name, 'peticionamento-eletrônico') ||
+        matchChannel(c.name, 'peticionamento-eletronico') ||
+        matchChannel(c.name, 'peticionamento') ||
+        matchChannel(c.name, 'processos') ||
+        matchChannel(c.name, 'comunicacao-interna')
+      )
+    );
+
+    const now = Date.now();
+    const twoDaysMs = 48 * 60 * 60 * 1000;
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+
+    for (const chan of processChannels) {
+      const posts = await fetchAllPostsFromChannel(chan);
+      for (const post of posts) {
+        try {
+          const msgs = await post.messages.fetch({ limit: 50 }).catch(() => null);
+          if (!msgs || msgs.size === 0) continue;
+
+          const msgsArr = safeGetArray(msgs).sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+          
+          // Localiza a última mensagem que seja um !oficio
+          const lastOficioIndex = msgsArr.findLastIndex(m => 
+            (m.content && (m.content.includes('OFÍCIO JUDICIAL') || m.content.includes('!oficio') || m.content.includes('Ato Ordinatório'))) ||
+            (m.embeds && m.embeds.some(e => (e.title || '').includes('OFÍCIO') || (e.description || '').includes('OFÍCIO')))
+          );
+
+          if (lastOficioIndex !== -1) {
+            const oficioMsg = msgsArr[lastOficioIndex];
+            const oficioAge = now - oficioMsg.createdTimestamp;
+
+            // Verifica se o ofício tem mais de 48h
+            if (oficioAge >= twoDaysMs) {
+              // Verifica se houve alguma mensagem posterior de Juiz de Direito
+              let hasSubsequentJudgeMsg = false;
+              for (let i = lastOficioIndex + 1; i < msgsArr.length; i++) {
+                const postMsg = msgsArr[i];
+                if (postMsg.member && postMsg.member.roles.cache.some(r => r.name.toLowerCase().includes('juiz') || r.name.toLowerCase().includes('magistrad'))) {
+                  hasSubsequentJudgeMsg = true;
+                  break;
+                }
+              }
+
+              // Se não houve manifestação posterior do Juiz
+              if (!hasSubsequentJudgeMsg) {
+                const lastAlert = lastAlertedOficioMap.get(post.id) || 0;
+                // Evita enviar alertas duplicados na mesma thread se alertou há menos de 7 dias
+                if (now - lastAlert >= sevenDaysMs) {
+                  const avisoOficio = 
+                    `-----------------------------------------\n` +
+                    `🏛️ **OFÍCIO AUTOMÁTICO - ALERTA DE CONCLUSÃO PROCESSUAL**\n` +
+                    `*Gabinete da Magistratura | Lembrete de Auditoria de Prazos*\n\n` +
+                    `Atenciosamente,\n\n` +
+                    `Prezado Excelentíssimo Senhor Juiz de Direito ${drRenatoMention},\n\n` +
+                    `Certifico e dou fé que o presente processo teve expedição de Ofício/Ato Ordinatório há mais de 48 horas e ainda **aguarda despacho conclusivo ou nova movimentação nos autos**.\n\n` +
+                    `👉 **Determinação:** Solicitamos que estes autos sejam analisados e tornados conclusos para despacho ou decisão interlocutória, dada a probabilidade de necessitar de movimentação processual.\n\n` +
+                    `Dado e passado pela Secretaria Automatizada do Tribunal de Justiça.\n` +
+                    `-----------------------------------------`;
+
+                  await post.send({
+                    content: avisoOficio,
+                    allowedMentions: { users: drRenatoMember ? [drRenatoMember.id] : [] }
+                  }).catch(() => null);
+
+                  lastAlertedOficioMap.set(post.id, now);
+                }
+              }
+            }
+          }
+        } catch (errThread) {}
+      }
+    }
+
+    // =========================================================================
+    // MÓDULO B: NOTIFICAÇÃO DE INATIVIDADE DE ADVOGADOS EM 🏛️・executiva-oab (> 30 DIAS)
+    // =========================================================================
+    const oabChannel = channelsArray.find(c => 
+      c && c.isTextBased() && (
+        matchChannel(c.name, 'executiva-oab') ||
+        matchChannel(c.name, 'oab') ||
+        c.name.toLowerCase().includes('oab')
+      )
+    );
+
+    if (oabChannel) {
+      const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+      const advRoles = mainGuild.roles.cache.filter(r => 
+        r.name.toLowerCase().includes('advogad') || r.name.toLowerCase().includes('oab')
+      );
+
+      const advMembers = membersArray.filter(m => 
+        !m.user.bot && m.roles.cache.some(r => advRoles.has(r.id))
+      );
+
+      // Coleta autores ativos de petições nos últimos 30 dias
+      const activeAdvocates = new Set();
+
+      for (const chan of processChannels) {
+        const posts = await fetchAllPostsFromChannel(chan);
+        for (const post of posts) {
+          if (post.createdTimestamp && (now - post.createdTimestamp < thirtyDaysMs)) {
+            if (post.ownerId) activeAdvocates.add(post.ownerId);
+          }
+          const msgs = await post.messages.fetch({ limit: 30 }).catch(() => null);
+          if (msgs) {
+            msgs.forEach(m => {
+              if (m.author && (now - m.createdTimestamp < thirtyDaysMs)) {
+                activeAdvocates.add(m.author.id);
+              }
+            });
+          }
+        }
+      }
+
+      const inactiveAdvs = advMembers.filter(m => !activeAdvocates.has(m.id));
+
+      if (inactiveAdvs.length > 0) {
+        const listStr = inactiveAdvs.slice(0, 15).map(m => `• <@${m.id}> (\`${m.displayName}\`) - *Sem petições/atuação nos últimos 30 dias*`).join('\n');
+        
+        const oficioOab = 
+          `-----------------------------------------\n` +
+          `🏛️ **OFÍCIO AUTOMÁTICO - RELATÓRIO DE INATIVIDADE DA ADVOCACIA**\n` +
+          `*Ordem dos Advogados do Brasil • Diretoria Executiva*\n\n` +
+          `Prezado Dr. Renato ${drRenatoMention}, Presidente e Diretoria da OAB,\n\n` +
+          `Apresentamos o relatório de acompanhamento de bancas e causídicos cadastrados na Seccional:\n\n` +
+          `👥 **Advogados Sem Movimentação Processual Registrada Há 30+ Dias:**\n${listStr}\n\n` +
+          `📢 **Determinação:** Solicitamos aos causídicos listados que atualizem seus cadastros institucionais ou informem a regularidade de suas causas ativas perante a Ordem.\n\n` +
+          `Dado e passado pela Secretaria de Gestão da Ordem dos Advogados.\n` +
+          `-----------------------------------------`;
+
+        await oabChannel.send({
+          content: oficioOab,
+          allowedMentions: { users: drRenatoMember ? [drRenatoMember.id] : [] }
+        }).catch(() => null);
+      }
+    }
+
+    // =========================================================================
+    // MÓDULO C: AUDITORIA PÚBLICA DO MINISTÉRIO PÚBLICO EM 📢・notas-públicas
+    // =========================================================================
+    const notasPublicasChan = channelsArray.find(c => 
+      c && c.isTextBased() && (
+        matchChannel(c.name, 'notas-públicas') ||
+        matchChannel(c.name, 'notas-publicas') ||
+        c.name.toLowerCase().includes('notas-públicas') ||
+        c.name.toLowerCase().includes('notas-publicas')
+      )
+    );
+
+    if (notasPublicasChan) {
+      const mpMembers = membersArray.filter(m => 
+        !m.user.bot && m.roles.cache.some(r => r.name.toLowerCase().includes('promotor') || r.name.toLowerCase().includes('ministério público') || r.name.toLowerCase().includes('ministerio publico'))
+      );
+
+      const mpStats = new Map();
+      mpMembers.forEach(m => mpStats.set(m.id, { member: m, manifestacoes: 0 }));
+
+      const pendingMpThreads = [];
+
+      for (const chan of processChannels) {
+        const posts = await fetchAllPostsFromChannel(chan);
+        for (const post of posts) {
+          const msgs = await post.messages.fetch({ limit: 30 }).catch(() => null);
+          if (!msgs) continue;
+          const msgsArr = safeGetArray(msgs).sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+
+          msgsArr.forEach(m => {
+            if (m.author && mpStats.has(m.author.id)) {
+              mpStats.get(m.author.id).manifestacoes++;
+            }
+          });
+
+          // Verifica se o processo cita o MP e está sem resposta do MP há mais de 48h
+          const lastMsg = msgsArr[msgsArr.length - 1];
+          if (lastMsg && (now - lastMsg.createdTimestamp >= twoDaysMs)) {
+            const mentionsMp = (post.name + ' ' + lastMsg.content).toLowerCase().includes('promotor') || 
+                               (post.name + ' ' + lastMsg.content).toLowerCase().includes('ministério público');
+            if (mentionsMp) {
+              pendingMpThreads.push(post);
+            }
+          }
+        }
+      }
+
+      let mpReportList = '';
+      mpStats.forEach((data, id) => {
+        mpReportList += `• **Promotor(a) <@${id}>:** ${data.manifestacoes} manifestação(ões) nos autos.\n`;
+      });
+      if (!mpReportList) mpReportList = '• *Nenhum integrante do MP localizado no cadastro ativo.*';
+
+      let pendingMpList = '';
+      if (pendingMpThreads.length > 0) {
+        pendingMpList = pendingMpThreads.slice(0, 10).map(t => `• Processo <#${t.id}> (${t.name}) - *Aguardando manifestação do MP (> 48h)*`).join('\n');
+      } else {
+        pendingMpList = '🟢 *Nenhum processo criminal com vista pendente ao MP há mais de 48h.*';
+      }
+
+      const notasReport = 
+        `-----------------------------------------\n` +
+        `🏛️ **RELATÓRIO PÚBLICO DE AUDITORIA PROCESSUAL DO MINISTÉRIO PÚBLICO**\n` +
+        `*Gabinete de Transparência & Controle Social do Governo Federal*\n\n` +
+        `Comunicamos à população e aos órgãos correcionais o balanço de acompanhamento da atuação ministerial:\n\n` +
+        `⚖️ **Balanço de Atuação dos Promotores de Justiça nos Autos:**\n${mpReportList}\n\n` +
+        `⏳ **Processos com Vista Pendente ao Ministério Público (> 48h):**\n${pendingMpList}\n\n` +
+        `📢 **Nota de Transparência:** O Ministério Público é instituição permanente e essencial à função jurisdicional do Estado.\n\n` +
+        `Certidão emitida pelo Sistema de Inteligência Judicial do Tribunal.\n` +
+        `-----------------------------------------`;
+
+      await notasPublicasChan.send({
+        content: notasReport,
+        allowedMentions: { parse: [] }
+      }).catch(() => null);
+    }
+
+    console.log('[Sistema de Lembretes] ✅ Varredura e envio dos Módulos A, B e C concluídos!');
+  } catch (errReminders) {
+    console.error('[Sistema de Lembretes] Erro ao executar varredura:', errReminders);
+  }
+}
+
 // HELPER PARA REPLICAR E DEPLOYA PARÂMETROS E PAINÉIS NO SERVIDOR DE BACKUP
 async function syncAndSetupBackupGuild(client) {
   try {
@@ -1987,9 +2236,19 @@ client.once('ready', async () => {
       // 8. Sincronização e Implantação Automática do Servidor de Backup
       try {
         await syncAndSetupBackupGuild(client);
-        logs.push(`  └─ 🔄 [Servidor Backup] Estrutura e Painéis sincronizados no BACKUP GOV BR.`);
+        logs.push(`  ├─ 🔄 [Servidor Backup] Estrutura e Painéis sincronizados no BACKUP GOV BR.`);
       } catch (e) {
-        logs.push(`  └─ ❌ [Servidor Backup] Falha na sincronização: ${e.message}`);
+        logs.push(`  ├─ ❌ [Servidor Backup] Falha na sincronização: ${e.message}`);
+      }
+
+      // 9. Módulo de Lembretes & Auditoria Judicial (Módulos A, B e C)
+      try {
+        await runJudicialReminderSystem(client);
+        // Agendamento semanal (7 dias)
+        setInterval(() => runJudicialReminderSystem(client), 7 * 24 * 60 * 60 * 1000);
+        logs.push(`  └─ ⏰ [Sistema Lembretes] Módulos A, B e C inicializados e agendados semanalmente.`);
+      } catch (e) {
+        logs.push(`  └─ ❌ [Sistema Lembretes] Falha na inicialização: ${e.message}`);
       }
 
       console.log(logs.join('\n'));
@@ -2518,6 +2777,37 @@ client.on('messageCreate', async (message) => {
     } catch (errOabSetup) {
       console.error('[OAB Setup] Erro no comando !setup-oab:', errOabSetup);
       await message.reply('❌ Ocorreu um erro ao enviar o painel da OAB.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !RODAR-LEMBRETES OU !AUDITORIA-PROCESSUAL (RESTRITO AO DR. RENATO)
+  if (contentLower.startsWith('!rodar-lembretes') || contentLower.startsWith('!lembretes') || contentLower.startsWith('!auditoria-processual')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+
+      if (!isDrRenato) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas o Dr. Renato pode disparar a varredura manual do Sistema de Lembretes.').catch(() => null);
+        return;
+      }
+
+      const progress = await message.reply('⏰ **Sistema de Lembretes:** Iniciando varredura manual dos Módulos A, B e C...').catch(() => null);
+
+      await runJudicialReminderSystem(client);
+
+      await progress.edit({
+        content: `✅ **Varredura concluída com sucesso!**\n` +
+                 `• **Módulo A:** Processos com \`!oficio\` (> 48h) notificados.\n` +
+                 `• **Módulo B:** Inatividade de advogados (> 30 dias) enviada em \`🏛️・executiva-oab\`.\n` +
+                 `• **Módulo C:** Relatório do MP publicado em \`📢・notas-públicas\`.`
+      }).catch(() => null);
+    } catch (errLembretes) {
+      console.error('Erro no comando !rodar-lembretes:', errLembretes);
+      await message.reply('❌ Ocorreu um erro ao rodar a varredura de lembretes.').catch(() => null);
     }
     return;
   }
