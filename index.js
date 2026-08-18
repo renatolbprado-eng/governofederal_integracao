@@ -754,21 +754,22 @@ async function runJudicialReminderSystem(client) {
     const allChannels = await mainGuild.channels.fetch().catch(() => mainGuild.channels.cache);
     const channelsArray = safeGetArray(allChannels);
 
-    // Mapeia TODOS os canais que contêm processos/peticionamento
+    // Mapeia EXCLUSIVAMENTE o canal Fórum 📜・petições (e variações de peticionamento)
     const processChannels = channelsArray.filter(c => 
-      c && (c.threads || c.isTextBased()) && (
+      c && (
+        matchChannel(c.name, 'petições') ||
+        matchChannel(c.name, 'peticoes') ||
+        matchChannel(c.name, 'petição') ||
+        matchChannel(c.name, 'peticao') ||
         matchChannel(c.name, 'peticionamento-eletrônico') ||
         matchChannel(c.name, 'peticionamento-eletronico') ||
         matchChannel(c.name, 'peticionamento') ||
-        matchChannel(c.name, 'processos') ||
-        matchChannel(c.name, 'comunicacao-interna') ||
-        matchChannel(c.name, 'comunicação-interna') ||
-        c.name.toLowerCase().includes('processo') ||
-        c.name.toLowerCase().includes('peticionamento')
+        c.name.toLowerCase().includes('petiç') ||
+        c.name.toLowerCase().includes('petic')
       )
     );
 
-    console.log(`[Sistema de Lembretes] 🔍 Identificados ${processChannels.length} canais de processos/peticionamento.`);
+    console.log(`[Sistema de Lembretes] 🔍 Identificados ${processChannels.length} canais Fórum de Petições.`);
 
     const now = Date.now();
     const twoDaysMs = 48 * 60 * 60 * 1000;
@@ -776,8 +777,13 @@ async function runJudicialReminderSystem(client) {
     let alertsSentCount = 0;
 
     for (const chan of processChannels) {
-      const posts = await fetchAllPostsFromChannel(chan);
-      console.log(`[Sistema de Lembretes] 📂 Canal "${chan.name}": ${posts.length} tópicos/threads encontrados.`);
+      let posts = await fetchAllPostsFromChannel(chan);
+      // Fallback de segurança: se a busca de arquivados não trouxer nada, pega o cache de tópicos ativos
+      if (posts.length === 0 && chan.threads && chan.threads.cache) {
+        posts = Array.from(chan.threads.cache.values());
+      }
+
+      console.log(`[Sistema de Lembretes] 📂 Canal Fórum "${chan.name}": ${posts.length} posts/processos encontrados.`);
 
       for (const post of posts) {
         try {
@@ -845,11 +851,11 @@ async function runJudicialReminderSystem(client) {
 
               lastAlertedOficioMap.set(post.id, now);
               alertsSentCount++;
-              console.log(`[Sistema de Lembretes] 🏛️ Alerta enviado na thread "${post.name}" (ID: ${post.id}).`);
+              console.log(`[Sistema de Lembretes] 🏛️ Alerta enviado no post do canal 📜・petições "${post.name}" (ID: ${post.id}).`);
             }
           }
         } catch (errThread) {
-          console.error(`[Sistema de Lembretes] Erro ao analisar thread ${post.name}:`, errThread);
+          console.error(`[Sistema de Lembretes] Erro ao analisar post ${post.name}:`, errThread);
         }
       }
     }
