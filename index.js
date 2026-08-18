@@ -529,6 +529,148 @@ async function getEntendimentosTribunalContext(guild, query = '') {
   return `\n\n--- BASE DE CONHECIMENTO & ENTENDIMENTOS OFICIAIS DO TRIBUNAL DE JUSTIÇA ---\n${safeText}`;
 }
 
+// FORÇA A RE-INDEXAÇÃO COMPLETA DOS ENTENDIMENTOS DO TRIBUNAL
+async function forceRefreshEntendimentosCache(guild) {
+  if (!guild) return 0;
+  try {
+    const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
+    const channelsArray = safeGetArray(channels);
+    const targetChannel = channelsArray.find(c => 
+      c && c.isTextBased() && (
+        matchChannel(c.name, 'entendimentos-do-tribunal') ||
+        matchChannel(c.name, 'entendimentos')
+      )
+    );
+
+    if (!targetChannel) return 0;
+
+    const sortedMsgs = await fetchAllChannelMessages(targetChannel, 500);
+
+    const textList = sortedMsgs.map(m => {
+      let body = m.content || '';
+      if (m.embeds && m.embeds.length > 0) {
+        const embedContent = m.embeds.map(e => {
+          let t = '';
+          if (e.title) t += `[${e.title}] `;
+          if (e.description) t += `${e.description} `;
+          if (e.fields && e.fields.length > 0) {
+            t += e.fields.map(f => `${f.name}: ${f.value}`).join(' | ');
+          }
+          return t;
+        }).join(' ');
+        body += ` ${embedContent}`;
+      }
+      return body.trim() ? `• ${body.trim()}` : null;
+    }).filter(Boolean);
+
+    if (textList.length > 0) {
+      tribunalEntendimentosCache = textList.join('\n');
+      lastEntendimentosFetch = Date.now();
+
+      try {
+        fs.writeFileSync(KNOWLEDGE_BASE_PATH, JSON.stringify({
+          timestamp: lastEntendimentosFetch,
+          count: textList.length,
+          text: tribunalEntendimentosCache
+        }, null, 2), 'utf8');
+      } catch (e) {}
+    }
+    return textList.length;
+  } catch (err) {
+    console.error('Erro ao forçar atualização do cache de entendimentos:', err);
+    return 0;
+  }
+}
+
+// FORMATA E PUBLICA UM NOVO ENTENDIMENTO NO CANAL ⚖️・entendimentos-do-tribunal (RESTRITO AO DR. RENATO)
+async function publishNewEntendimento(guild, authorUser, rawContent) {
+  if (!guild || !rawContent) return { success: false, error: 'Conteúdo não fornecido' };
+
+  const channels = await guild.channels.fetch().catch(() => guild.channels.cache);
+  const channelsArray = safeGetArray(channels);
+  const targetChannel = channelsArray.find(c => 
+    c && c.isTextBased() && (
+      matchChannel(c.name, 'entendimentos-do-tribunal') ||
+      matchChannel(c.name, 'entendimentos')
+    )
+  );
+
+  if (!targetChannel) return { success: false, error: 'Canal de entendimentos não localizado' };
+
+  // 1. Descobre o maior número N atual de Entendimento no canal
+  const msgs = await fetchAllChannelMessages(targetChannel, 500);
+  let maxNum = 0;
+  msgs.forEach(m => {
+    const text = m.content || '';
+    const matches = text.match(/Entendimento\s+(\d+)/gi);
+    if (matches) {
+      matches.forEach(match => {
+        const num = parseInt(match.replace(/Entendimento\s+/i, ''), 10);
+        if (!isNaN(num) && num > maxNum) maxNum = num;
+      });
+    }
+  });
+
+  const nextNum = maxNum > 0 ? maxNum + 1 : 69;
+
+  // 2. Lapida e formata o texto com a IA Gemini (se disponível) mantendo rigor jurídico
+  let formattedText = rawContent.trim();
+
+  if (genAI) {
+    try {
+      const modelCandidates = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-flash-latest'];
+      let aiResult = null;
+      for (const mName of modelCandidates) {
+        try {
+          const model = genAI.getGenerativeModel({ model: mName });
+          const promptAI = `Você é o redator jurídico oficial do Tribunal de Justiça do Dr. Renato.
+Sua tarefa é pegar o texto/rascunho bruto fornecido abaixo e lapidá-lo em formato de Súmula / Entendimento Jurisprudencial Oficial do Tribunal de Justiça.
+
+REGRAS CRÍTICAS DE FORMATAÇÃO:
+1. Retorne APENAS o texto límpido da tese/regra jurídica em português, formal, objetivo e com força normativa.
+2. NUNCA adicione o número do entendimento, emojis, prefixos (como "Entendimento X"), aspas externas ou títulos no início. Apenas a frase/parágrafo do entendimento em si.
+3. Se o texto original fornecido pelo magistrado já for direto e claro, mantenha-o refinado sem alterar seu sentido legal.
+
+TEXTO BRUTO FORNECIDO PELO MAGISTRADO:
+"${rawContent}"`;
+
+          const res = await model.generateContent(promptAI);
+          if (res && res.response) {
+            aiResult = res.response.text().trim().replace(/^["']|["']$/g, '');
+            if (aiResult && aiResult.length > 5) break;
+          }
+        } catch (e) {}
+      }
+      if (aiResult && aiResult.length > 5) {
+        formattedText = aiResult;
+      }
+    } catch (e) {
+      console.warn('Falha na lapidação da IA para o entendimento, usando texto original:', e);
+    }
+  }
+
+  // 3. Monta a mensagem final no padrão exato do canal:
+  // <:Brasao:1528148736495194234> Entendimento N - <Texto>
+  const finalMessage = `<:Brasao:1528148736495194234> Entendimento ${nextNum} - ${formattedText}`;
+
+  // 4. Publica no canal sem marcar ninguém
+  const sentMsg = await targetChannel.send({
+    content: finalMessage,
+    allowedMentions: { parse: [] }
+  });
+
+  // 5. Atualiza a base de conhecimento dinâmica e arquivo local
+  await forceRefreshEntendimentosCache(guild);
+
+  return {
+    success: true,
+    num: nextNum,
+    text: formattedText,
+    msgUrl: sentMsg.url,
+    channelId: targetChannel.id
+  };
+}
+
 // HELPER PARA REPLICAR E DEPLOYA PARÂMETROS E PAINÉIS NO SERVIDOR DE BACKUP
 async function syncAndSetupBackupGuild(client) {
   try {
@@ -2556,6 +2698,76 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
+  // COMANDO !NOVO-ENTENDIMENTO OU !ENTENDIMENTO (RESTRITO EXCLUSIVAMENTE AO DR. RENATO)
+  if (contentLower.startsWith('!novo-entendimento') || contentLower.startsWith('!entendimento') || contentLower.startsWith('!criar-entendimento')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+
+      if (!isDrRenato) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas o Dr. Renato possui competência para redigir e oficializar novos Entendimentos no Tribunal.').catch(() => null);
+        return;
+      }
+
+      const rawText = message.content.replace(/^!(novo-entendimento|entendimento|criar-entendimento)/i, '').trim();
+      if (!rawText) {
+        await message.reply('⚠️ **Uso Incorreto:** Informe o conteúdo do entendimento. Exemplo:\n`!novo-entendimento Ação e processo são, na Cidade, sinônimos.`').catch(() => null);
+        return;
+      }
+
+      const progress = await message.reply('⚖️ **Gabinete do Dr. Renato:** Lapidando e formatando o novo Entendimento no padrão oficial do Tribunal...').catch(() => null);
+
+      const res = await publishNewEntendimento(message.guild, message.author, rawText);
+
+      if (res.success) {
+        await progress.edit({
+          content: `✅ **Entendimento ${res.num} publicado com sucesso no canal <#${res.channelId}>!**\n\n` +
+                   `> <:Brasao:1528148736495194234> **Entendimento ${res.num} -** ${res.text}\n\n` +
+                   `🔗 [Ver Publicação Oficial no Tribunal](${res.msgUrl})\n` +
+                   `🧠 *Base de conhecimento da IA atualizada instantaneamente.*`
+        }).catch(() => null);
+      } else {
+        await progress.edit({ content: `❌ **Erro:** ${res.error}` }).catch(() => null);
+      }
+    } catch (errCmdEnt) {
+      console.error('Erro ao publicar entendimento:', errCmdEnt);
+      await message.reply('❌ Ocorreu um erro ao publicar o novo entendimento.').catch(() => null);
+    }
+    return;
+  }
+
+  // COMANDO !ATUALIZAR-ENTENDIMENTOS OU !LER-ENTENDIMENTOS (RESTRITO AO DR. RENATO)
+  if (contentLower.startsWith('!atualizar-entendimentos') || contentLower.startsWith('!ler-entendimentos') || contentLower.startsWith('!reindexar-entendimentos')) {
+    try {
+      const authorMember = message.member;
+      const usernameLower = message.author.username.toLowerCase();
+      const displayNameLower = authorMember?.displayName?.toLowerCase() || '';
+
+      const isDrRenato = usernameLower.includes('renat') || displayNameLower.includes('renat');
+
+      if (!isDrRenato) {
+        await message.reply('⚠️ **Acesso Negado:** Apenas o Dr. Renato pode solicitar a re-indexação da base de entendimentos do Tribunal.').catch(() => null);
+        return;
+      }
+
+      const progress = await message.reply('🧠 **Inteligência Artificial:** Varrendo o canal `⚖️・entendimentos-do-tribunal` e atualizando toda a base de conhecimento...').catch(() => null);
+
+      const count = await forceRefreshEntendimentosCache(message.guild);
+
+      await progress.edit({
+        content: `✅ **Base de Conhecimento Recarregada!** A IA leu e indexou **${count} entendimentos oficiais** do Tribunal de Justiça.\n` +
+                 `*Todas as respostas da IA utilizarão esta jurisprudência atualizada.*`
+      }).catch(() => null);
+    } catch (errReindex) {
+      console.error('Erro ao re-indexar entendimentos:', errReindex);
+      await message.reply('❌ Ocorreu um erro ao atualizar os entendimentos.').catch(() => null);
+    }
+    return;
+  }
+
   // COMANDO !RESTRINGIR-OAB <@advogado|ID> [motivo]
   if (contentLower.startsWith('!restringir-oab') || contentLower.startsWith('!suspender-oab')) {
     try {
@@ -3559,6 +3771,31 @@ client.on('messageCreate', async (message) => {
                       promptLower.includes('apenas para mim') || 
                       promptLower.includes('secreto') || 
                       promptLower.includes('em segredo');
+
+    // Detecção automática de publicação de Entendimento via IA (Exclusivo Dr. Renato)
+    if (isDrRenato && (promptLower.includes('publicar entendimento') || promptLower.includes('criar entendimento') || promptLower.includes('novo entendimento') || promptLower.includes('cadastrar entendimento'))) {
+      const cleanIdea = prompt
+        .replace(/(publicar|criar|novo|cadastrar)\s+(um\s+)?entendimento/i, '')
+        .replace(/(em|no|para\s+o)\s+canal\s+(de\s+)?entendimentos(-do-tribunal)?/i, '')
+        .replace(/^[:\s-]+/, '')
+        .trim();
+
+      if (cleanIdea && cleanIdea.length > 5) {
+        const progress = await message.reply('⚖️ **Gabinete do Dr. Renato:** Processando e oficializando o novo Entendimento no canal `⚖️・entendimentos-do-tribunal`...').catch(() => null);
+        const res = await publishNewEntendimento(message.guild, message.author, cleanIdea);
+        if (res.success) {
+          await progress.edit({
+            content: `✅ **Entendimento ${res.num} publicado com sucesso no canal <#${res.channelId}>!**\n\n` +
+                     `> <:Brasao:1528148736495194234> **Entendimento ${res.num} -** ${res.text}\n\n` +
+                     `🔗 [Ver Publicação Oficial no Tribunal](${res.msgUrl})\n` +
+                     `🧠 *Base de conhecimento da IA recarregada instantaneamente.*`
+          }).catch(() => null);
+        } else {
+          await progress.edit({ content: `❌ **Erro ao publicar entendimento:** ${res.error}` }).catch(() => null);
+        }
+        return;
+      }
+    }
 
     await message.channel.sendTyping().catch(() => null);
 
