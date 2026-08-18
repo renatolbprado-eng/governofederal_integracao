@@ -754,22 +754,17 @@ async function runJudicialReminderSystem(client) {
     const allChannels = await mainGuild.channels.fetch().catch(() => mainGuild.channels.cache);
     const channelsArray = safeGetArray(allChannels);
 
-    // Mapeia EXCLUSIVAMENTE o canal Fórum 📜・petições (e variações de peticionamento)
+    // Mapeia EXCLUSIVAMENTE o canal Fórum 📜・petições
     const processChannels = channelsArray.filter(c => 
       c && (
+        c.name.includes('petições') ||
+        c.name.includes('peticoes') ||
         matchChannel(c.name, 'petições') ||
-        matchChannel(c.name, 'peticoes') ||
-        matchChannel(c.name, 'petição') ||
-        matchChannel(c.name, 'peticao') ||
-        matchChannel(c.name, 'peticionamento-eletrônico') ||
-        matchChannel(c.name, 'peticionamento-eletronico') ||
-        matchChannel(c.name, 'peticionamento') ||
-        c.name.toLowerCase().includes('petiç') ||
-        c.name.toLowerCase().includes('petic')
-      )
+        matchChannel(c.name, 'peticoes')
+      ) && !c.name.toLowerCase().includes('eletrôn') && !c.name.toLowerCase().includes('eletron')
     );
 
-    console.log(`[Sistema de Lembretes] 🔍 Identificados ${processChannels.length} canais Fórum de Petições.`);
+    console.log(`[Sistema de Lembretes] 🔍 Identificados ${processChannels.length} canais Fórum 📜・petições.`);
 
     const now = Date.now();
     const twoDaysMs = 48 * 60 * 60 * 1000;
