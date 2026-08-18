@@ -734,7 +734,7 @@ ${historyStr}`;
 }
 
 async function runJudicialReminderSystem(client) {
-  console.log('[Sistema de Lembretes] ⚙️ Executando auditoria via IA dos Módulos do Juiz e do Ministério Público...');
+  console.log('[Sistema de Lembretes] ⚙️ Executando varredura e auditoria via IA dos Processos Parados...');
   try {
     const mainGuild = client.guilds.cache.get('1142251068890304522') || client.guilds.cache.first();
     if (!mainGuild) return;
@@ -754,26 +754,31 @@ async function runJudicialReminderSystem(client) {
     const allChannels = await mainGuild.channels.fetch().catch(() => mainGuild.channels.cache);
     const channelsArray = safeGetArray(allChannels);
 
+    // Mapeia TODOS os canais que contêm processos/peticionamento
     const processChannels = channelsArray.filter(c => 
-      c && c.threads && (
+      c && (c.threads || c.isTextBased()) && (
         matchChannel(c.name, 'peticionamento-eletrônico') ||
         matchChannel(c.name, 'peticionamento-eletronico') ||
         matchChannel(c.name, 'peticionamento') ||
         matchChannel(c.name, 'processos') ||
-        matchChannel(c.name, 'comunicacao-interna')
+        matchChannel(c.name, 'comunicacao-interna') ||
+        matchChannel(c.name, 'comunicação-interna') ||
+        c.name.toLowerCase().includes('processo') ||
+        c.name.toLowerCase().includes('peticionamento')
       )
     );
 
+    console.log(`[Sistema de Lembretes] 🔍 Identificados ${processChannels.length} canais de processos/peticionamento.`);
+
     const now = Date.now();
     const twoDaysMs = 48 * 60 * 60 * 1000;
-    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
     const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    let alertsSentCount = 0;
 
-    // =========================================================================
-    // MÓDULO 1: PROCESSOS COM !OFICIO SEM DESPACHO (> 48H) - NOTIFICAÇÃO AO JUIZ
-    // =========================================================================
     for (const chan of processChannels) {
       const posts = await fetchAllPostsFromChannel(chan);
+      console.log(`[Sistema de Lembretes] 📂 Canal "${chan.name}": ${posts.length} tópicos/threads encontrados.`);
+
       for (const post of posts) {
         try {
           const msgs = await post.messages.fetch({ limit: 50 }).catch(() => null);
@@ -781,16 +786,18 @@ async function runJudicialReminderSystem(client) {
 
           const msgsArr = safeGetArray(msgs).sort((a, b) => a.createdTimestamp - b.createdTimestamp);
           
-          // Localiza a última mensagem que seja um !oficio
+          // 1. Procura se há um !oficio no processo
           const lastOficioIndex = msgsArr.findLastIndex(m => 
             (m.content && (m.content.includes('OFÍCIO JUDICIAL') || m.content.includes('!oficio') || m.content.includes('Ato Ordinatório'))) ||
             (m.embeds && m.embeds.some(e => (e.title || '').includes('OFÍCIO') || (e.description || '').includes('OFÍCIO')))
           );
 
+          // 2. Se houver ofício OU se a última mensagem tiver mais de 48h sem manifestação do Juiz
+          let isPendingJuiz = false;
+
           if (lastOficioIndex !== -1) {
             const oficioMsg = msgsArr[lastOficioIndex];
             const oficioAge = now - oficioMsg.createdTimestamp;
-
             if (oficioAge >= twoDaysMs) {
               let hasSubsequentJudgeMsg = false;
               for (let i = lastOficioIndex + 1; i < msgsArr.length; i++) {
@@ -800,137 +807,54 @@ async function runJudicialReminderSystem(client) {
                   break;
                 }
               }
-
-              if (!hasSubsequentJudgeMsg) {
-                const lastAlert = lastAlertedOficioMap.get(post.id) || 0;
-                if (now - lastAlert >= sevenDaysMs) {
-                  // Filtra as últimas 5 mensagens relevantes para a IA
-                  const relevantMsgs = filterRelevantLastMessages(msgsArr, ['juiz', 'magistrado', 'despacho', 'dr. renato', 'renato']);
-                  const aiSummary = await generateProcessSummaryWithAI(post.name, relevantMsgs);
-
-                  const avisoOficio = 
-                    `-----------------------------------------\n` +
-                    `🏛️ **OFÍCIO AUTOMÁTICO - ALERTA DE CONCLUSÃO PROCESSUAL**\n` +
-                    `*Gabinete da Magistratura | Auditoria de Prazos do Tribunal*\n\n` +
-                    `Atenciosamente,\n\n` +
-                    `Prezado Excelentíssimo Senhor Juiz de Direito ${drRenatoMention},\n\n` +
-                    `Certifico e dou fé que estes autos tiveram expedição de Ofício/Ato Ordinatório há mais de 48 horas e ainda **aguardam despacho conclusivo ou nova movimentação**.\n\n` +
-                    `💡 **Síntese do Processo (Análise da IA):**\n` +
-                    `> *${aiSummary}*\n\n` +
-                    `👉 **Determinação:** Solicitamos que estes autos sejam analisados e tornados conclusos para despacho ou decisão interlocutória.\n\n` +
-                    `Dado e passado pela Secretaria Automatizada do Tribunal de Justiça.\n` +
-                    `-----------------------------------------`;
-
-                  await post.send({
-                    content: avisoOficio,
-                    allowedMentions: { users: drRenatoMember ? [drRenatoMember.id] : [] }
-                  }).catch(() => null);
-
-                  lastAlertedOficioMap.set(post.id, now);
-                }
-              }
+              if (!hasSubsequentJudgeMsg) isPendingJuiz = true;
+            }
+          } else {
+            // Se não tem !oficio explícito, mas a última mensagem do processo tem mais de 48h e não é do Juiz
+            const lastMsg = msgsArr[msgsArr.length - 1];
+            if (lastMsg && (now - lastMsg.createdTimestamp >= twoDaysMs)) {
+              let isLastFromJudge = lastMsg.member && lastMsg.member.roles.cache.some(r => r.name.toLowerCase().includes('juiz') || r.name.toLowerCase().includes('magistrad'));
+              if (!isLastFromJudge) isPendingJuiz = true;
             }
           }
-        } catch (errThread) {}
-      }
-    }
 
-    // =========================================================================
-    // MÓDULO 2: AUDITORIA DO MINISTÉRIO PÚBLICO EM 📢・notas-públicas
-    // (PENDENTES DE MANIFESTAÇÃO + MANIFESTAÇÕES NO ÚLTIMO MÊS)
-    // =========================================================================
-    const notasPublicasChan = channelsArray.find(c => 
-      c && c.isTextBased() && (
-        matchChannel(c.name, 'notas-públicas') ||
-        matchChannel(c.name, 'notas-publicas') ||
-        c.name.toLowerCase().includes('notas-públicas') ||
-        c.name.toLowerCase().includes('notas-publicas')
-      )
-    );
-
-    if (notasPublicasChan) {
-      const mpMembers = membersArray.filter(m => 
-        !m.user.bot && m.roles.cache.some(r => 
-          r.name.toLowerCase().includes('promotor') || 
-          r.name.toLowerCase().includes('ministério público') || 
-          r.name.toLowerCase().includes('ministerio publico') ||
-          r.name.toLowerCase().includes('mp')
-        )
-      );
-
-      const mpStats = new Map();
-      mpMembers.forEach(m => mpStats.set(m.id, { member: m, manifestacoes: 0 }));
-
-      const pendingMpThreads = [];
-
-      for (const chan of processChannels) {
-        const posts = await fetchAllPostsFromChannel(chan);
-        for (const post of posts) {
-          const msgs = await post.messages.fetch({ limit: 30 }).catch(() => null);
-          if (!msgs) continue;
-          const msgsArr = safeGetArray(msgs).sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-
-          // 1. Contabiliza manifestações do MP no último mês (30 dias)
-          msgsArr.forEach(m => {
-            if (m.author && mpStats.has(m.author.id) && (now - m.createdTimestamp < thirtyDaysMs)) {
-              mpStats.get(m.author.id).manifestacoes++;
-            }
-          });
-
-          // 2. Verifica se o processo possui intimação/vista/menção ao MP há mais de 48h sem resposta
-          const lastMsg = msgsArr[msgsArr.length - 1];
-          if (lastMsg && (now - lastMsg.createdTimestamp >= twoDaysMs)) {
-            const mentionsMp = (post.name + ' ' + lastMsg.content).toLowerCase().includes('promotor') || 
-                               (post.name + ' ' + lastMsg.content).toLowerCase().includes('ministério público') ||
-                               (post.name + ' ' + lastMsg.content).toLowerCase().includes('@mp') ||
-                               (post.name + ' ' + lastMsg.content).toLowerCase().includes('promotoria');
-
-            if (mentionsMp) {
-              const relevantMsgs = filterRelevantLastMessages(msgsArr, ['@mp', '@promotor', 'promotor', 'ministério público', 'promotoria']);
+          if (isPendingJuiz) {
+            const lastAlert = lastAlertedOficioMap.get(post.id) || 0;
+            if (now - lastAlert >= sevenDaysMs) {
+              // Filtra as últimas 5 mensagens para a síntese da IA
+              const relevantMsgs = filterRelevantLastMessages(msgsArr, ['juiz', 'magistrado', 'despacho', 'dr. renato', 'renato', 'petição']);
               const aiSummary = await generateProcessSummaryWithAI(post.name, relevantMsgs);
-              pendingMpThreads.push({ thread: post, summary: aiSummary });
+
+              const avisoOficio = 
+                `-----------------------------------------\n` +
+                `🏛️ **OFÍCIO AUTOMÁTICO - ALERTA DE CONCLUSÃO PROCESSUAL**\n` +
+                `*Gabinete da Magistratura | Auditoria de Prazos do Tribunal*\n\n` +
+                `Atenciosamente,\n\n` +
+                `Prezado Excelentíssimo Senhor Juiz de Direito ${drRenatoMention},\n\n` +
+                `Certifico e dou fé que estes autos possuem expediente pendente há mais de 48 horas e ainda **aguardam despacho conclusivo ou nova movimentação**.\n\n` +
+                `💡 **Síntese do Processo (Análise da IA):**\n` +
+                `> *${aiSummary}*\n\n` +
+                `👉 **Determinação:** Solicitamos que estes autos sejam analisados e tornados conclusos para despacho ou decisão interlocutória.\n\n` +
+                `Dado e passado pela Secretaria Automatizada do Tribunal de Justiça.\n` +
+                `-----------------------------------------`;
+
+              await post.send({
+                content: avisoOficio,
+                allowedMentions: { users: drRenatoMember ? [drRenatoMember.id] : [] }
+              }).catch(() => null);
+
+              lastAlertedOficioMap.set(post.id, now);
+              alertsSentCount++;
+              console.log(`[Sistema de Lembretes] 🏛️ Alerta enviado na thread "${post.name}" (ID: ${post.id}).`);
             }
           }
+        } catch (errThread) {
+          console.error(`[Sistema de Lembretes] Erro ao analisar thread ${post.name}:`, errThread);
         }
       }
-
-      // Monta lista de manifestações no último mês
-      let mpReportList = '';
-      mpStats.forEach((data, id) => {
-        mpReportList += `• **Promotor(a) <@${id}>:** \`${data.manifestacoes}\` manifestação(ões) oferecida(s) no último mês.\n`;
-      });
-      if (!mpReportList) mpReportList = '• *Nenhum integrante do Ministério Público localizado no cadastro ativo.*';
-
-      // Monta lista de pendentes com análise da IA
-      let pendingMpList = '';
-      if (pendingMpThreads.length > 0) {
-        pendingMpList = pendingMpThreads.slice(0, 10).map((item, idx) => 
-          `**${idx + 1}. Processo <#${item.thread.id}>** (\`${item.thread.name}\`)\n` +
-          `> 💡 *Síntese (IA): ${item.summary}*\n` +
-          `> ⏳ *Status:* Aguardando manifestação do Ministério Público há mais de 48h.`
-        ).join('\n\n');
-      } else {
-        pendingMpList = '🟢 *Nenhum processo com vista ou intimação pendente ao MP há mais de 48h.*';
-      }
-
-      const notasReport = 
-        `-----------------------------------------\n` +
-        `🏛️ **RELATÓRIO PÚBLICO DE AUDITORIA PROCESSUAL DO MINISTÉRIO PÚBLICO**\n` +
-        `*Gabinete de Transparência & Controle Social do Governo Federal*\n\n` +
-        `Comunicamos à população, ao Tribunal e aos órgãos correcionais o balanço auditado pela IA da atuação ministerial:\n\n` +
-        `⚖️ **1. QUANTIDADE DE MANIFESTAÇÕES DO MP (Último Mês):**\n${mpReportList}\n\n` +
-        `⏳ **2. PROCESSOS PENDENTES DE MANIFESTAÇÃO DO MP (> 48h):**\n${pendingMpList}\n\n` +
-        `📢 **Nota de Transparência:** O Ministério Público é instituição permanente e essencial à função jurisdicional do Estado.\n\n` +
-        `Certidão emitida pelo Sistema de Inteligência Judicial do Tribunal.\n` +
-        `-----------------------------------------`;
-
-      await notasPublicasChan.send({
-        content: notasReport,
-        allowedMentions: { parse: [] }
-      }).catch(() => null);
     }
 
-    console.log('[Sistema de Lembretes] ✅ Auditoria e emissão via IA concluídas com sucesso!');
+    console.log(`[Sistema de Lembretes] ✅ Auditoria de Processos Parados concluída! Total de alertas enviados: ${alertsSentCount}`);
   } catch (errReminders) {
     console.error('[Sistema de Lembretes] Erro ao executar varredura:', errReminders);
   }
@@ -1427,17 +1351,17 @@ async function fetchAllPostsFromChannel(chan) {
   try {
     const active = await chan.threads.fetchActive().catch(() => null);
     if (active && active.threads) {
-      const activeArr = safeGetArray(active.threads);
+      const activeArr = active.threads.values ? Array.from(active.threads.values()) : safeGetArray(active.threads);
       activeArr.forEach(t => { if (t && t.id) postsMap.set(t.id, t); });
     }
     const archPub = await chan.threads.fetchArchived({ type: 'public' }).catch(() => null);
     if (archPub && archPub.threads) {
-      const archPubArr = safeGetArray(archPub.threads);
+      const archPubArr = archPub.threads.values ? Array.from(archPub.threads.values()) : safeGetArray(archPub.threads);
       archPubArr.forEach(t => { if (t && t.id) postsMap.set(t.id, t); });
     }
     const archPriv = await chan.threads.fetchArchived({ type: 'private' }).catch(() => null);
     if (archPriv && archPriv.threads) {
-      const archPrivArr = safeGetArray(archPriv.threads);
+      const archPrivArr = archPriv.threads.values ? Array.from(archPriv.threads.values()) : safeGetArray(archPriv.threads);
       archPrivArr.forEach(t => { if (t && t.id) postsMap.set(t.id, t); });
     }
   } catch (e) {}
@@ -2811,15 +2735,13 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
-      const progress = await message.reply('⏰ **Sistema de Lembretes:** Iniciando varredura manual dos Módulos A, B e C...').catch(() => null);
+      const progress = await message.reply('⏰ **Sistema de Lembretes:** Iniciando varredura manual de Processos Parados e expedição de alertas com análise da IA...').catch(() => null);
 
       await runJudicialReminderSystem(client);
 
       await progress.edit({
-        content: `✅ **Varredura concluída com sucesso!**\n` +
-                 `• **Módulo A:** Processos com \`!oficio\` (> 48h) notificados.\n` +
-                 `• **Módulo B:** Inatividade de advogados (> 30 dias) enviada em \`🏛️・executiva-oab\`.\n` +
-                 `• **Módulo C:** Relatório do MP publicado em \`📢・notas-públicas\`.`
+        content: `✅ **Varredura de Auditoria Processual Concluída com Sucesso!**\n` +
+                 `• **Auditoria do Magistrado:** Todos os processos com expedientes parados há mais de 48h foram analisados pela IA e notificados para conclusão.`
       }).catch(() => null);
     } catch (errLembretes) {
       console.error('Erro no comando !rodar-lembretes:', errLembretes);
